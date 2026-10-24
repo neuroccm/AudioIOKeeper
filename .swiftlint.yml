@@ -1,0 +1,41 @@
+included:
+  - AudioIOKeeper
+  - AudioIOKeeperTests
+
+excluded:
+  - DerivedData
+  - .build
+
+opt_in_rules:
+  - empty_count
+  - explicit_init
+  - fatal_error_message
+  - first_where
+
+disabled_rules:
+  # Doc comments are encouraged by review, not forced per-declaration.
+  - missing_docs
+
+line_length:
+  warning: 130
+  error: 160
+  ignores_comments: true
+  ignores_urls: true
+
+type_body_length:
+  warning: 300
+  error: 450
+
+file_length:
+  warning: 400
+  error: 600
+
+function_body_length:
+  warning: 50
+  error: 80
+
+identifier_name:
+  min_length:
+    warning: 2
+  excluded:
+    - id
