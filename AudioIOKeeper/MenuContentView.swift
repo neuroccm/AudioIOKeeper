@@ -24,7 +24,7 @@ struct MenuContentView: View {
 
     private var header: some View {
         HStack(spacing: 8) {
-            Image(systemName: "waveform.badge.lock")
+            Image(systemName: MenuBarSymbol.keeping)
                 .font(.title3)
                 .foregroundStyle(.tint)
             VStack(alignment: .leading, spacing: 1) {

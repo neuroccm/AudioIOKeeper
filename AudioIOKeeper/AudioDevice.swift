@@ -21,7 +21,7 @@ enum AudioDirection: String, Sendable, CaseIterable {
 }
 
 /// How a device is connected, used only to pick a helpful icon.
-enum TransportType: Sendable, Equatable {
+enum TransportType: Sendable, Equatable, CaseIterable {
     case builtIn
     case bluetooth
     case usb

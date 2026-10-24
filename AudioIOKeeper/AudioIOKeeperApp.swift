@@ -30,7 +30,7 @@ struct AudioIOKeeperApp: App {
             MenuContentView()
                 .environment(model)
         } label: {
-            Label("Audio IO Keeper", systemImage: menuBarSymbol)
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
 
@@ -39,12 +39,47 @@ struct AudioIOKeeperApp: App {
                 .environment(model)
         }
     }
+}
 
-    /// The menu bar icon doubles as a status light:
-    /// locked waveform = keeping, plain waveform = keeping off,
-    /// warning = a pinned device is currently disconnected.
-    private var menuBarSymbol: String {
-        if model.isAnyDirectionWaiting { return "waveform.badge.exclamationmark" }
-        return model.isKeepingAnything ? "waveform.badge.lock" : "waveform"
+/// SF Symbol names for the menu bar status icon.
+///
+/// Every name here must be a real symbol on the oldest supported macOS
+/// (14.0): `Image(systemName:)` with a nonexistent name renders as an
+/// empty, zero-width image, which in a menu bar item looks exactly like
+/// the app has vanished. That is how the keeping state used to disappear —
+/// it named `waveform.badge.lock`, a symbol that does not exist in any
+/// release. `MenuBarSymbolTests` asserts each name resolves to an image.
+enum MenuBarSymbol {
+    /// Keeping is on and every pinned device is present.
+    static let keeping = "waveform.circle.fill"
+    /// Keeping is off in both directions.
+    static let idle = "waveform"
+    /// A pinned device is disconnected (or a direction is conflicted).
+    static let waiting = "waveform.badge.exclamationmark"
+
+    static let all = [keeping, idle, waiting]
+
+    static func name(isWaiting: Bool, isKeeping: Bool) -> String {
+        if isWaiting { return waiting }
+        return isKeeping ? keeping : idle
+    }
+}
+
+/// The menu bar item's label, as its own view so the model's observable
+/// state is read (and tracked) here instead of in the app's scene builder.
+/// Reading it in `Scene` body rebuilds the whole scene graph — including
+/// the `MenuBarExtra` item itself — on every model change (each reconcile
+/// and activity-log entry), which can make the item flicker or drop.
+private struct MenuBarLabel: View {
+    let model: AppModel
+
+    var body: some View {
+        Label(
+            "Audio IO Keeper",
+            systemImage: MenuBarSymbol.name(
+                isWaiting: model.isAnyDirectionWaiting,
+                isKeeping: model.isKeepingAnything
+            )
+        )
     }
 }
