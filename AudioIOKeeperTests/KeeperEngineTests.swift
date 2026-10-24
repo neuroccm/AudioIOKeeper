@@ -260,6 +260,31 @@ final class DirectionStatusTests: XCTestCase {
         XCTAssertEqual(status, .notKeeping)
     }
 
+    /// A deliberate pause outranks drift/conflict reporting: the user asked
+    /// for switching to be left alone, so nothing about it is a problem.
+    func testPausedStatusWhileKeepingOn() {
+        let status = DirectionStatus.status(
+            keepingEnabled: true,
+            pinnedUID: "speakers",
+            currentUID: "airpods",
+            availableUIDs: ["speakers", "airpods"],
+            isPaused: true
+        )
+        XCTAssertEqual(status, .paused)
+    }
+
+    /// With keeping off the pause is irrelevant; "off" is the fuller truth.
+    func testNotKeepingOutranksPaused() {
+        let status = DirectionStatus.status(
+            keepingEnabled: false,
+            pinnedUID: "speakers",
+            currentUID: "airpods",
+            availableUIDs: ["speakers", "airpods"],
+            isPaused: true
+        )
+        XCTAssertEqual(status, .notKeeping)
+    }
+
     func testNoPinSelected() {
         let status = DirectionStatus.status(
             keepingEnabled: true,

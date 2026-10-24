@@ -176,15 +176,20 @@ enum DirectionStatus: Equatable, Sendable {
     case waitingForPinnedDevice
     /// Keeping is on with no pin chosen yet.
     case noPinSelected
+    /// Keeping is on but deliberately paused for a while; the system may
+    /// switch freely until the pause ends.
+    case paused
 
     static func status(
         keepingEnabled: Bool,
         pinnedUID: String?,
         currentUID: String?,
         availableUIDs: Set<String>,
-        inConflict: Bool = false
+        inConflict: Bool = false,
+        isPaused: Bool = false
     ) -> DirectionStatus {
         guard keepingEnabled else { return .notKeeping }
+        if isPaused { return .paused }
         guard let pinnedUID else { return .noPinSelected }
         guard availableUIDs.contains(pinnedUID) else { return .waitingForPinnedDevice }
         if currentUID == pinnedUID { return .kept }

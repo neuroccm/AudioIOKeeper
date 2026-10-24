@@ -15,6 +15,18 @@ struct SettingsView: View {
                      + "AirPods are taken out or a nearby iPhone offers itself as a mic.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+                if model.isPaused, let until = model.pausedUntil {
+                    LabeledContent("Keeping paused until", value: until.formatted(date: .omitted, time: .shortened))
+                    Button("Resume keeping now") { model.resumeKeeping() }
+                } else {
+                    Button("Pause keeping for \(Int(AppModel.defaultPauseDuration / 60)) minutes") {
+                        model.pauseKeeping()
+                    }
+                }
+                Text("Pausing lets macOS switch freely for a while — handy for one call "
+                     + "on AirPods — then keeping resumes and restores your pins automatically.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Devices") {

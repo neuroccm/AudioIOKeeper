@@ -10,6 +10,10 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
+            if model.isPaused || model.isKeepingAnything {
+                pauseControls
+            }
+
             DirectionSection(direction: .output)
             Divider()
             DirectionSection(direction: .input)
@@ -43,6 +47,41 @@ struct MenuContentView: View {
             .controlSize(.small)
             .help("Re-read the connected audio devices (useful after moving between docks or hubs)")
             .accessibilityLabel("Rescan connected devices")
+        }
+    }
+
+    /// One row, two states: offer a timed pause, or show the running
+    /// pause with its deadline and an early exit.
+    @ViewBuilder
+    private var pauseControls: some View {
+        if model.isPaused, let until = model.pausedUntil {
+            HStack(spacing: 6) {
+                Image(systemName: "pause.circle.fill")
+                    .foregroundStyle(.orange)
+                Text("Keeping paused until \(until, format: .dateTime.hour().minute())")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Resume now") { model.resumeKeeping() }
+                    .controlSize(.small)
+                    .accessibilityLabel("Resume keeping now")
+            }
+        } else {
+            HStack {
+                Text("Need macOS to switch just this once?")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button {
+                    model.pauseKeeping()
+                } label: {
+                    Label("Pause \(Int(AppModel.defaultPauseDuration / 60)) min", systemImage: "pause.circle")
+                }
+                .controlSize(.small)
+                .help("Let macOS switch devices freely for a while (e.g. AirPods for one call); "
+                      + "keeping then resumes and restores your pins automatically")
+                .accessibilityLabel("Pause keeping for \(Int(AppModel.defaultPauseDuration / 60)) minutes")
+            }
         }
     }
 
@@ -177,6 +216,7 @@ private struct DirectionSection: View {
         case .conflicted: "Something keeps switching this — backing off and retrying periodically"
         case .waitingForPinnedDevice: "“\(pinnedName)” is disconnected — will restore on return"
         case .noPinSelected: "Pick a device below to keep it"
+        case .paused: "Paused — macOS may switch freely"
         }
     }
 
@@ -188,6 +228,7 @@ private struct DirectionSection: View {
         case .conflicted: "exclamationmark.shield.fill"
         case .waitingForPinnedDevice: "exclamationmark.triangle.fill"
         case .noPinSelected: "questionmark.circle"
+        case .paused: "pause.circle"
         }
     }
 
@@ -197,7 +238,7 @@ private struct DirectionSection: View {
         case .conflicted: .red
         case .waitingForPinnedDevice: .orange
         case .restoring: .blue
-        case .notKeeping, .noPinSelected: .secondary
+        case .notKeeping, .noPinSelected, .paused: .secondary
         }
     }
 

@@ -29,6 +29,10 @@ macOS moves a default on its own, moves it straight back.
   in Settings) re-reads the connected devices and re-checks your pins, for
   the rare cases where a hot-plug change was missed.
 - Keeping can be switched off per direction (input/output) at any time.
+- Need macOS to switch just this once — AirPods in for a single call?
+  **Pause 15 min** (popover, and in Settings) suspends keeping in both
+  directions without unpinning anything, then resumes and restores your
+  pins automatically. The deadline survives a relaunch.
 - Every action the keeper takes is shown in the popover's activity log. An app
   that overrides system behavior should never act invisibly.
 

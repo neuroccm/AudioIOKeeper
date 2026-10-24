@@ -78,7 +78,7 @@ private struct MenuBarLabel: View {
             "Audio IO Keeper",
             systemImage: MenuBarSymbol.name(
                 isWaiting: model.isAnyDirectionWaiting,
-                isKeeping: model.isKeepingAnything
+                isKeeping: model.isActivelyKeepingAnything
             )
         )
     }

@@ -296,6 +296,70 @@ final class AppModelTests: XCTestCase {
         XCTAssertEqual(model.currentUID(for: .output), "speakers")
     }
 
+    /// A pause lets macOS switch freely (AirPods in for one call) without
+    /// unpinning anything; resuming restores the pin.
+    func testPauseLeavesSystemSwitchAloneUntilResume() async throws {
+        model.pauseKeeping(for: 900)
+        XCTAssertTrue(model.isPaused)
+        XCTAssertEqual(model.status(for: .output), .paused)
+        worker.resetRecordedCalls()
+
+        worker.simulateSystemSwitch(to: "airpods", for: .output)
+        try await settle { model.currentUID(for: .output) == "airpods" }
+        XCTAssertTrue(worker.setDefaultCalls.isEmpty, "no restores while paused")
+
+        model.resumeKeeping()
+        XCTAssertFalse(model.isPaused)
+        try await settle { model.currentUID(for: .output) == "speakers" }
+        XCTAssertEqual(worker.setDefaultCalls.map(\.uid), ["speakers"], "resume restores the pin once")
+    }
+
+    /// Expiry is decided against the clock on reconcile, so a pause ends on
+    /// time even if the wake-up task was lost across sleep/wake.
+    func testPauseExpiresViaClock() async throws {
+        model.pauseKeeping(for: 900)
+        worker.resetRecordedCalls()
+
+        worker.simulateSystemSwitch(to: "airpods", for: .output)
+        try await settle { model.currentUID(for: .output) == "airpods" }
+        XCTAssertTrue(worker.setDefaultCalls.isEmpty)
+
+        clock.advance(by: 901)
+        worker.ping()
+        try await settle { model.currentUID(for: .output) == "speakers" }
+        XCTAssertFalse(model.isPaused)
+        XCTAssertEqual(worker.setDefaultCalls.map(\.uid), ["speakers"])
+    }
+
+    /// The pause deadline is persisted: relaunching mid-pause keeps the
+    /// keeper's hands off until the deadline or an explicit resume.
+    func testPauseSurvivesRelaunch() async throws {
+        let localSuite = "AudioIOKeeperTests-Pause-\(UUID().uuidString)"
+        let localDefaults = UserDefaults(suiteName: localSuite)!
+        defer { localDefaults.removePersistentDomain(forName: localSuite) }
+        let localSettings = SettingsStore(defaults: localDefaults)
+        localSettings.setPin(uid: "speakers", name: "Studio Speakers", for: .output)
+        localSettings.setPin(uid: "usb-mic", name: "USB Mic", for: .input)
+        localSettings.setPausedUntil(clock.now().addingTimeInterval(900))
+
+        let localWorker = FakeAudioHardwareWorker()
+        localWorker.devices = worker.devices
+        localWorker.setSystemDefault("airpods", for: .output) // drifted before relaunch
+        localWorker.setSystemDefault("usb-mic", for: .input)
+
+        let clock = self.clock!
+        let relaunched = AppModel(worker: localWorker, settings: localSettings, now: { clock.now() })
+        relaunched.start()
+        try await settle { relaunched.currentUID(for: .output) == "airpods" }
+
+        XCTAssertTrue(relaunched.isPaused)
+        XCTAssertTrue(localWorker.setDefaultCalls.isEmpty, "relaunch must not restore while a pause is active")
+
+        relaunched.resumeKeeping()
+        try await settle { relaunched.currentUID(for: .output) == "speakers" }
+        XCTAssertEqual(localWorker.setDefaultCalls.map(\.uid), ["speakers"])
+    }
+
     func testSettingsRoundTrip() {
         settings.setPin(uid: "abc", name: "Some Device", for: .input)
         XCTAssertEqual(settings.pinnedUID(for: .input), "abc")
@@ -308,5 +372,12 @@ final class AppModelTests: XCTestCase {
         XCTAssertTrue(settings.keepingEnabled(for: .input), "keeping defaults to on")
         settings.setKeepingEnabled(false, for: .input)
         XCTAssertFalse(settings.keepingEnabled(for: .input))
+
+        XCTAssertNil(settings.pausedUntil())
+        let deadline = Date(timeIntervalSince1970: 1_234_567)
+        settings.setPausedUntil(deadline)
+        XCTAssertEqual(settings.pausedUntil(), deadline)
+        settings.setPausedUntil(nil)
+        XCTAssertNil(settings.pausedUntil())
     }
 }

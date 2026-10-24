@@ -22,6 +22,7 @@ struct SettingsStore: @unchecked Sendable {
         static let pinnedOutputUID = "pinnedOutputDeviceUID"
         static let pinnedInputName = "pinnedInputDeviceName"
         static let pinnedOutputName = "pinnedOutputDeviceName"
+        static let pausedUntil = "keepingPausedUntil"
     }
 
     func keepingEnabled(for direction: AudioDirection) -> Bool {
@@ -44,6 +45,22 @@ struct SettingsStore: @unchecked Sendable {
     /// pinned device while it is disconnected.
     func pinnedName(for direction: AudioDirection) -> String? {
         defaults.string(forKey: direction == .input ? Key.pinnedInputName : Key.pinnedOutputName)
+    }
+
+    /// Deadline until which keeping is paused, if a pause is set. Persisted
+    /// so relaunching mid-pause does not silently resume enforcement; an
+    /// expired deadline is reported as-is and interpreted by the caller.
+    func pausedUntil() -> Date? {
+        guard let stored = defaults.object(forKey: Key.pausedUntil) as? Double else { return nil }
+        return Date(timeIntervalSinceReferenceDate: stored)
+    }
+
+    func setPausedUntil(_ date: Date?) {
+        if let date {
+            defaults.set(date.timeIntervalSinceReferenceDate, forKey: Key.pausedUntil)
+        } else {
+            defaults.removeObject(forKey: Key.pausedUntil)
+        }
     }
 
     func setPin(uid: String?, name: String?, for direction: AudioDirection) {

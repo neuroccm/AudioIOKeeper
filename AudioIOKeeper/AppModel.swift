@@ -53,6 +53,12 @@ final class AppModel {
     @ObservationIgnored private var reconcilePending = false
     @ObservationIgnored private var reconcileReason = "after a system change"
     @ObservationIgnored private var retryTasks: [AudioDirection: Task<Void, Never>] = [:]
+    @ObservationIgnored private var resumeTask: Task<Void, Never>?
+
+    /// How long "Pause keeping" lasts: long enough for a call or a couple
+    /// of songs on another device, short enough that forgetting about it
+    /// does not leave the keeper off-duty for the day.
+    static let defaultPauseDuration: TimeInterval = 15 * 60
 
     init(
         worker: any AudioHardwareWorking = AudioHardwareWorker(),
@@ -76,6 +82,10 @@ final class AppModel {
             for await _ in pings {
                 self?.requestReconcile(reason: "after a system change")
             }
+        }
+        if let until = settings.pausedUntil(), until > now() {
+            log("Keeping is paused until \(until.formatted(date: .omitted, time: .shortened))")
+            scheduleResume(at: until)
         }
         requestReconcile(reason: "at launch")
     }
@@ -124,6 +134,13 @@ final class AppModel {
             adoptCurrentDefaultsAsInitialPins()
         }
 
+        // A pause whose deadline has passed ends here even if its wake-up
+        // task never fired (system sleep can overrun a timer): expiry is
+        // decided against the clock, the task only makes it prompt.
+        if settings.pausedUntil() != nil, !isPaused {
+            resumeKeeping()
+        }
+
         for direction in AudioDirection.allCases {
             await enforcePin(for: direction, reason: reason)
         }
@@ -147,7 +164,7 @@ final class AppModel {
     private func enforcePin(for direction: AudioDirection, reason: String) async {
         let available = Set(devices.filter { $0.supports(direction) }.map(\.uid))
         let action = KeeperEngine.action(
-            keepingEnabled: keepingEnabled(for: direction),
+            keepingEnabled: keepingEnabled(for: direction) && !isPaused,
             pinnedUID: settings.pinnedUID(for: direction),
             currentUID: currentUID(for: direction),
             availableUIDs: available
@@ -258,6 +275,49 @@ final class AppModel {
         if enabled { requestReconcile(reason: "after enabling keeping") }
     }
 
+    /// Pauses keeping in both directions for a while, so macOS may switch
+    /// freely (AirPods in for one call) without unpinning anything.
+    /// Pins, toggles, and explicit in-app selections are unaffected — a
+    /// device picked here still applies immediately; only automatic
+    /// restores hold off. The deadline is persisted, so relaunching
+    /// mid-pause does not silently resume, and any drift during the pause
+    /// is the user's own business, never counted as a conflict.
+    func pauseKeeping(for duration: TimeInterval = AppModel.defaultPauseDuration) {
+        let until = now().addingTimeInterval(duration)
+        settings.setPausedUntil(until)
+        for direction in AudioDirection.allCases {
+            throttles[direction]?.reset()
+            retryTasks[direction]?.cancel()
+        }
+        scheduleResume(at: until)
+        log("Paused keeping for \(Int(duration / 60)) minutes — macOS may switch freely")
+    }
+
+    /// Ends a pause (manually, on expiry, or when the wake-up task fires)
+    /// and immediately re-checks the pins, restoring any that drifted.
+    func resumeKeeping() {
+        guard settings.pausedUntil() != nil else { return }
+        settings.setPausedUntil(nil)
+        resumeTask?.cancel()
+        resumeTask = nil
+        for direction in AudioDirection.allCases {
+            throttles[direction]?.reset()
+            retryTasks[direction]?.cancel()
+        }
+        log("Resumed keeping")
+        requestReconcile(reason: "after resuming from a pause")
+    }
+
+    private func scheduleResume(at date: Date) {
+        resumeTask?.cancel()
+        let delay = max(0, date.timeIntervalSince(now()))
+        resumeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            self?.resumeKeeping()
+        }
+    }
+
     // MARK: - Derived state for the UI
 
     func devices(for direction: AudioDirection) -> [AudioDevice] {
@@ -281,6 +341,15 @@ final class AppModel {
         settings.keepingEnabled(for: direction)
     }
 
+    /// The persisted pause deadline, past or future; `isPaused` gives it
+    /// meaning against the clock.
+    var pausedUntil: Date? { settings.pausedUntil() }
+
+    var isPaused: Bool {
+        guard let until = settings.pausedUntil() else { return false }
+        return until > now()
+    }
+
     func isConflicting(for direction: AudioDirection) -> Bool {
         throttles[direction]?.isConflicting(now: now()) ?? false
     }
@@ -296,7 +365,8 @@ final class AppModel {
             pinnedUID: pinnedUID(for: direction),
             currentUID: currentUID(for: direction),
             availableUIDs: Set(devices(for: direction).map(\.uid)),
-            inConflict: isConflicting(for: direction)
+            inConflict: isConflicting(for: direction),
+            isPaused: isPaused
         )
     }
 
@@ -310,6 +380,12 @@ final class AppModel {
 
     var isKeepingAnything: Bool {
         AudioDirection.allCases.contains { keepingEnabled(for: $0) }
+    }
+
+    /// `isKeepingAnything` with an active pause netted out, for the menu
+    /// bar icon: a paused keeper is off-duty and should look it.
+    var isActivelyKeepingAnything: Bool {
+        isKeepingAnything && !isPaused
     }
 
     // MARK: - Activity log
