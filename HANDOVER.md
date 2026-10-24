@@ -64,34 +64,30 @@ Commit history:
 - An early bug was caught this way: keeper must start in the AppDelegate,
   NOT from the menu popover's `onAppear` (MenuBarExtra content is lazy).
 
-## The one outstanding task
+## The one outstanding task — DONE (2026-10-24)
 
-**Build & run the current code (`0c77bea`) locally on the user's Mac and
-re-run the live switch-and-restore check.** CI proves the code builds and
-tests pass; the new build has not yet run on real hardware. The app
-process currently running on the Mac (if still alive) is the OLD ad-hoc
-Debug build from `/tmp/AudioIOKeeperDerived/` — quit it before launching
-the new build.
+**Build & run the current code locally and re-run the live
+switch-and-restore check: completed.** On the 1.1.0 tree (stability work
+plus the release polish below): 25 unit tests pass locally, ad-hoc Debug
+build launched, and with present-device pins the probe check passed in
+both directions — output switched to the BenQ display was restored to
+MacBook Pro Speakers within ~3 s, and input switched to the iPhone
+Continuity mic was restored to MacBook Pro Microphone. The user's stored
+pins (Scarlett Solo USB / Yeti Nano, both disconnected at the time) and
+the pre-test system defaults were restored afterwards and verified. The
+waiting behavior for a disconnected pin was also observed live
+(no forced switch).
 
-Exact sequence for the next session:
-
-```sh
-cd /Users/houman/Downloads/AudioIOKeeper
-git checkout -- AudioIOKeeper/KeeperEngine.swift   # discard stale partial edits (see below)
-git pull                                            # -> 0c77bea or later
-xcodegen generate
-xcodebuild test -project AudioIOKeeper.xcodeproj -scheme AudioIOKeeper \
-  -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
-xcodebuild build -project AudioIOKeeper.xcodeproj -scheme AudioIOKeeper \
-  -configuration Debug -destination 'platform=macOS' \
-  CODE_SIGN_STYLE=Manual CODE_SIGN_IDENTITY="-" \
-  -derivedDataPath /tmp/AudioIOKeeperDerived
-pkill -x AudioIOKeeper || true
-open /tmp/AudioIOKeeperDerived/Build/Products/Debug/AudioIOKeeper.app
-/tmp/audio_probe | grep DEFAULT                    # note current defaults
-/tmp/audio_probe set-output BuiltInSpeakerDevice   # simulate auto-switch
-sleep 2 && /tmp/audio_probe | grep DEFAULT         # expect pin restored
-```
+Also completed since: real app icon (all sizes + `packaging/` sources),
+native About panel from the popover plus an expanded Settings → About,
+single-lookup device resolution for restores
+(`kAudioHardwarePropertyDeviceForUID`), version 1.1.0, and
+`scripts/make-dmg.sh` producing `AudioIOKeeper-1.1.0.dmg` (app +
+Applications shortcut + `packaging/README.txt` + LICENSE; ad-hoc signed,
+not notarized). The Downloads copy is synced with GitHub `main`; the
+stale partial `KeeperEngine.swift` edits are gone, and
+`audioiokeeper-stability-review.md` is committed (original file, with a
+Resolution section) at the user's request.
 
 ## Environment gotchas (why the local build is outstanding)
 
@@ -146,9 +142,10 @@ Downloads copy:
   instant (throttled) — documented in README.
 - Branch protection on `main` intentionally left OFF (user's direct pushes
   must keep working); recommended to the user as optional.
-- App icon is still a placeholder (empty iconset); menu-bar icon is an SF
+- App icon: waveform + padlock, generated into
+  `AppIcon.appiconset` (sources in `packaging/`); menu-bar icon is an SF
   Symbol status light. Public .app releases need a paid Developer ID for
-  signing/notarization — not yet set up.
+  signing/notarization — not yet set up (DMG builds are ad-hoc signed).
 
 ## Suggested next steps after the local build
 

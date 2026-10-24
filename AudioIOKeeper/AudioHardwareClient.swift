@@ -89,13 +89,18 @@ final class CoreAudioHardwareClient: AudioHardwareClient, @unchecked Sendable {
 
     @discardableResult
     func setDefaultDevice(uid: String, for direction: AudioDirection) -> Bool {
-        guard let device = allDevices().first(where: { $0.uid == uid && $0.supports(direction) }) else {
+        // Resolve the single device directly from its UID instead of
+        // enumerating every device (several HAL queries each) just to find
+        // one id — every restore pays for this lookup.
+        guard let resolvedID = deviceID(forUID: uid),
+              uint32Property(resolvedID, selector: kAudioDevicePropertyDeviceIsAlive) != 0,
+              streamCount(resolvedID, scope: scope(for: direction)) > 0 else {
             let dir = direction.rawValue
             logger.error("Cannot set default \(dir, privacy: .public): device \(uid, privacy: .public) not present")
             return false
         }
         var address = address(for: direction)
-        var deviceID = AudioObjectID(device.objectID)
+        var deviceID = resolvedID
         let status = AudioObjectSetPropertyData(
             AudioObjectID(kAudioObjectSystemObject),
             &address,
@@ -118,6 +123,39 @@ final class CoreAudioHardwareClient: AudioHardwareClient, @unchecked Sendable {
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
+    }
+
+    private func scope(for direction: AudioDirection) -> AudioObjectPropertyScope {
+        direction == .input ? kAudioObjectPropertyScopeInput : kAudioObjectPropertyScopeOutput
+    }
+
+    /// Translates a persistent device UID to its current `AudioObjectID`
+    /// via `kAudioHardwarePropertyDeviceForUID` — one HAL query instead of
+    /// a full device enumeration.
+    private func deviceID(forUID uid: String) -> AudioObjectID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDeviceForUID,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var cfUID = uid as CFString
+        var resolvedID = AudioObjectID(kAudioObjectUnknown)
+        let status: OSStatus = withUnsafeMutablePointer(to: &cfUID) { inputPointer in
+            withUnsafeMutablePointer(to: &resolvedID) { outputPointer in
+                var translation = AudioValueTranslation(
+                    mInputData: UnsafeMutableRawPointer(inputPointer),
+                    mInputDataSize: UInt32(MemoryLayout<CFString>.size),
+                    mOutputData: UnsafeMutableRawPointer(outputPointer),
+                    mOutputDataSize: UInt32(MemoryLayout<AudioObjectID>.size)
+                )
+                var dataSize = UInt32(MemoryLayout<AudioValueTranslation>.size)
+                return AudioObjectGetPropertyData(
+                    AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &translation
+                )
+            }
+        }
+        guard status == noErr, resolvedID != AudioObjectID(kAudioObjectUnknown) else { return nil }
+        return resolvedID
     }
 
     // MARK: - Change listeners

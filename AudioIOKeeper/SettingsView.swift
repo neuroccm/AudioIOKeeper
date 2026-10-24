@@ -30,11 +30,31 @@ struct SettingsView: View {
             }
 
             Section("About") {
+                HStack(spacing: 12) {
+                    Image(nsImage: NSApplication.shared.applicationIconImage)
+                        .resizable()
+                        .frame(width: 48, height: 48)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Audio IO Keeper")
+                            .font(.headline)
+                        Text("Keeps your chosen audio input & output devices exactly "
+                             + "where you put them.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
                 LabeledContent("Version", value: Bundle.main.shortVersion)
+                LabeledContent("License", value: "MIT")
+                if let home = URL(string: "https://github.com/neuroccm/AudioIOKeeper") {
+                    Link("Audio IO Keeper on GitHub", destination: home)
+                }
                 Text("Audio IO Keeper only reads and writes the standard system default "
                      + "input/output device settings — the same ones in System Settings → "
                      + "Sound. It uses no private APIs, installs no drivers or extensions, "
-                     + "and never records or plays audio.")
+                     + "and never records or plays audio. If another app or automation "
+                     + "keeps switching a device back, restores back off gradually and "
+                     + "the popover shows the conflict instead of fighting it.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

@@ -21,6 +21,7 @@ Package.resolved
 .LSOverride
 
 # Misc
+*.dmg
 *.xcresult
 fastlane/report.xml
 fastlane/Preview.html

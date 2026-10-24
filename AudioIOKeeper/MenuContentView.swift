@@ -72,12 +72,44 @@ struct MenuContentView: View {
             Button("Settings…") { openSettings() }
                 .buttonStyle(.link)
             Spacer()
+            Button("About…") { showAboutPanel() }
+                .buttonStyle(.link)
+            Spacer()
             Button("Quit Audio IO Keeper") {
                 NSApplication.shared.terminate(nil)
             }
             .buttonStyle(.link)
         }
         .font(.callout)
+    }
+
+    /// Standard macOS About panel: app icon, name, version, and credits.
+    /// A menu-bar-only app has no app menu to host the usual About item,
+    /// so the popover footer provides it.
+    private func showAboutPanel() {
+        let credits = NSAttributedString(
+            string: """
+            Keeps your chosen audio input & output devices exactly where you put them.
+
+            Audio IO Keeper only reads and writes the standard system default \
+            input/output settings — the same ones in System Settings → Sound. \
+            No private APIs, drivers, or extensions; it never records or plays audio.
+
+            If something else keeps switching a device back, restores back off \
+            gradually and the popover shows the conflict instead of fighting it.
+
+            MIT License — https://github.com/neuroccm/AudioIOKeeper
+            """,
+            attributes: [
+                .font: NSFont.systemFont(ofSize: 11),
+                .foregroundColor: NSColor.labelColor
+            ]
+        )
+        NSApplication.shared.activate(ignoringOtherApps: true)
+        NSApplication.shared.orderFrontStandardAboutPanel(options: [
+            .applicationName: "Audio IO Keeper",
+            .credits: credits
+        ])
     }
 }
 

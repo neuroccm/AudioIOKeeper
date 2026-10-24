@@ -78,6 +78,13 @@ Run the tests:
 xcodebuild test -scheme AudioIOKeeper -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
 ```
 
+Build a shareable disk image (ad-hoc signed, not notarized — recipients
+open it once via right-click → Open):
+
+```sh
+scripts/make-dmg.sh   # writes ./AudioIOKeeper-<version>.dmg
+```
+
 ## Architecture
 
 | File | Role |
