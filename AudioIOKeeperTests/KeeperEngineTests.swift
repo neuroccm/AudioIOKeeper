@@ -150,6 +150,72 @@ final class RestoreThrottleTests: XCTestCase {
         XCTAssertEqual(throttle.decision(now: t0), .allow)
     }
 
+    /// Long-duration simulated clock: a competitor switches the pin away
+    /// immediately after every restore for a full simulated hour, crossing
+    /// many rolling-window boundaries. Backoff must be monotonic, reach
+    /// the cap, and hold it — deriving the exponent from the in-window
+    /// restore count regressed to 2–32 s cooldowns (294 restores/hour,
+    /// cap never reached) because old attempts expired from the window
+    /// while the conflict was still unresolved.
+    func testSustainedConflictEscalatesToCapAndHoldsIt() {
+        var throttle = RestoreThrottle()
+        var now = t0
+        let end = t0.addingTimeInterval(3_600)
+        var cooldowns: [TimeInterval] = []
+        var restores = 0
+        while now < end {
+            switch throttle.decision(now: now) {
+            case .allow:
+                throttle.recordRestore(at: now)
+                restores += 1
+                now = now.addingTimeInterval(0.05) // notification debounce
+            case .cooldown(let until):
+                cooldowns.append(until.timeIntervalSince(now))
+                now = until // retry exactly when the cooldown expires
+            }
+        }
+        XCTAssertEqual(Array(cooldowns.prefix(6)), [2, 4, 8, 16, 32, 60])
+        XCTAssertTrue(
+            cooldowns.dropFirst(6).allSatisfy { $0 == RestoreThrottle.maxCooldown },
+            "once the cap is reached it must hold for the rest of the conflict: \(cooldowns)"
+        )
+        XCTAssertTrue(zip(cooldowns, cooldowns.dropFirst()).allSatisfy { $0 <= $1 },
+                      "cooldowns must never shrink during an unresolved conflict")
+        XCTAssertLessThan(restores, 100,
+                          "a capped 60 s retry rate bounds the hour to ~70 restores, got \(restores)")
+        XCTAssertTrue(throttle.isConflicting(now: now))
+    }
+
+    /// Escalation is per-episode: after a verified stable period the next
+    /// exhaustion starts again from the base cooldown, not the old level.
+    func testEscalationResetsAfterStablePeriod() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        _ = throttle.decision(now: t0) // arm 2 s
+        let firstRetry = t0.addingTimeInterval(3)
+        XCTAssertEqual(throttle.decision(now: firstRetry), .allow)
+        throttle.recordRestore(at: firstRetry)
+        XCTAssertEqual(
+            throttle.decision(now: firstRetry),
+            .cooldown(until: firstRetry.addingTimeInterval(4)),
+            "second cooldown in the same episode doubles"
+        )
+
+        let later = firstRetry.addingTimeInterval(RestoreThrottle.quietReset + 1)
+        throttle.recordStableObservation(at: later)
+        XCTAssertEqual(throttle.escalationLevel, 0)
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: later)
+        }
+        XCTAssertEqual(
+            throttle.decision(now: later),
+            .cooldown(until: later.addingTimeInterval(RestoreThrottle.baseCooldown)),
+            "a new episode after a stable period starts from the base cooldown again"
+        )
+    }
+
     func testConflictStatusSurfaces() {
         let status = DirectionStatus.status(
             keepingEnabled: true,

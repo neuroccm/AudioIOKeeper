@@ -7,6 +7,7 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
+		0D9E71AC8E420EAFAC4C96DD /* AudioHardwareWorkerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = CCE5294E2A216F8059638BA4 /* AudioHardwareWorkerTests.swift */; };
 		223EC4465D2AF36673E07716 /* SettingsStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = D36AB8833724FFE4EF0560DD /* SettingsStore.swift */; };
 		34D46015118C939A5C77573F /* AudioHardwareClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = D77976F1C229393031B4F00D /* AudioHardwareClient.swift */; };
 		8078835A6B95E0FAE62AB3D5 /* KeeperEngine.swift in Sources */ = {isa = PBXBuildFile; fileRef = E5743E6A3A79C565DD4F3729 /* KeeperEngine.swift */; };
@@ -46,6 +47,7 @@
 		AD0627817F15A6FBA3991096 /* KeeperEngineTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeeperEngineTests.swift; sourceTree = "<group>"; };
 		C0699F3569969D87AE4FE0A4 /* AudioIOKeeper.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = AudioIOKeeper.entitlements; sourceTree = "<group>"; };
 		C7510B1D75FE9C24CA3EED5A /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
+		CCE5294E2A216F8059638BA4 /* AudioHardwareWorkerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioHardwareWorkerTests.swift; sourceTree = "<group>"; };
 		CFB7BEBE6DC8AF2A03E9197C /* AudioIOKeeper.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AudioIOKeeper.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		D36AB8833724FFE4EF0560DD /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
 		D77976F1C229393031B4F00D /* AudioHardwareClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioHardwareClient.swift; sourceTree = "<group>"; };
@@ -77,6 +79,7 @@
 			isa = PBXGroup;
 			children = (
 				7E69B1800C4381B4A704C235 /* AppModelTests.swift */,
+				CCE5294E2A216F8059638BA4 /* AudioHardwareWorkerTests.swift */,
 				AD0627817F15A6FBA3991096 /* KeeperEngineTests.swift */,
 			);
 			path = AudioIOKeeperTests;
@@ -193,6 +196,7 @@
 			buildActionMask = 2147483647;
 			files = (
 				E5BC23ABC487E676C7496C80 /* AppModelTests.swift in Sources */,
+				0D9E71AC8E420EAFAC4C96DD /* AudioHardwareWorkerTests.swift in Sources */,
 				AB1E925C25DBF67BBDEC6B0D /* KeeperEngineTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

@@ -23,13 +23,15 @@ struct HardwareWriteResult: Sendable {
 
 /// Async façade over the synchronous Core Audio client.
 ///
-/// All HAL reads and writes are serialized on one dedicated queue, never on
-/// the main thread: a slow or stalled driver call can delay this queue but
-/// cannot freeze the menu UI or the Quit button. Change notifications are
-/// coalesced (and briefly debounced) here, before they can spawn any work
-/// on the main actor — a burst of HAL notifications becomes a single ping.
+/// All HAL reads, writes, and listener registration are serialized on one
+/// dedicated queue, never on the main thread: a slow or stalled driver
+/// call can delay this queue but cannot freeze launch, the menu UI, or
+/// the Quit button. Change notifications are coalesced (and briefly
+/// debounced) here, before they can spawn any work on the main actor — a
+/// burst of HAL notifications becomes a single ping.
 protocol AudioHardwareWorking: Sendable {
-    /// Begins listening for hardware changes.
+    /// Begins listening for hardware changes. Registration itself runs on
+    /// the worker queue and must not block the caller.
     func start()
     /// Current hardware state, read on the worker queue.
     func snapshot() async -> HardwareSnapshot
@@ -70,8 +72,17 @@ final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
         started = true
         lock.unlock()
         guard shouldInstall else { return }
-        client.addChangeListener { [weak self] in
-            self?.noteHardwareChange()
+        // Listener registration is itself a synchronous HAL call
+        // (AudioObjectAddPropertyListenerBlock x3): it runs on the worker
+        // queue, ahead of the first snapshot enqueued after start(), so a
+        // HAL stall during registration delays hardware work only — never
+        // launch or the main event loop. The install-once guard above and
+        // the client's own guard both still apply.
+        queue.async { [weak self] in
+            guard let self else { return }
+            client.addChangeListener { [weak self] in
+                self?.noteHardwareChange()
+            }
         }
     }
 

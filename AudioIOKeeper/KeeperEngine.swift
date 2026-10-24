@@ -49,8 +49,13 @@ enum KeeperEngine {
 /// Policy: a small budget of immediate restores per rolling window covers
 /// ordinary one-off switches (AirPods out, iPhone mic appearing). Beyond the
 /// budget, restores are held back by exponentially growing cooldowns, capped
-/// so the keeper still retries at a controlled rate. A sustained quiet
-/// period with the pin in place resets everything. Pure value type with an
+/// so the keeper still retries at a controlled rate. The cooldown exponent
+/// is an escalation level tracked separately from the rolling budget: it
+/// only grows while a conflict is unresolved and never decays just because
+/// old attempts fell out of the window (deriving it from the in-window
+/// count made long conflicts collapse back to short cooldowns and never
+/// reach the cap). A sustained quiet period with the pin in place, or a
+/// deliberate user change, resets everything. Pure value type with an
 /// injected clock so the whole policy is unit-testable.
 struct RestoreThrottle: Equatable, Sendable {
 
@@ -72,34 +77,47 @@ struct RestoreThrottle: Equatable, Sendable {
     /// Pin continuously in place this long clears the history, in seconds.
     static let quietReset: TimeInterval = 60
 
+    /// Highest escalation that still changes the duration:
+    /// `baseCooldown * 2^5` already exceeds `maxCooldown`.
+    private static let maxEscalationLevel = 6
+
     private(set) var restoreTimes: [Date] = []
     private(set) var cooldownUntil: Date?
+    /// Cooldowns armed since the conflict was last resolved. Deliberately
+    /// independent of the rolling window so backoff is monotonic for the
+    /// whole episode and reaches (then holds) the cap.
+    private(set) var escalationLevel = 0
 
     /// True while repeated drift indicates something is actively fighting
     /// the keeper over this direction.
     func isConflicting(now: Date) -> Bool {
-        recentCount(now: now) >= Self.immediateBudget
+        escalationLevel > 0 || recentCount(now: now) >= Self.immediateBudget
     }
 
     /// Asks whether a restore may happen at `now`. Calling this when the
-    /// budget is exhausted arms the next cooldown; record every restore
-    /// actually performed via `recordRestore(at:)`.
+    /// budget is exhausted (or a conflict is already escalating) arms the
+    /// next cooldown; record every restore actually performed via
+    /// `recordRestore(at:)`.
     mutating func decision(now: Date) -> Decision {
         prune(now: now)
         if let cooldownUntil {
             if now < cooldownUntil {
                 return .cooldown(until: cooldownUntil)
             }
-            // Cooldown served: allow a single retry. Recording it pushes
-            // the count up, so the next decision arms a longer cooldown.
+            // Cooldown served: allow a single retry. Escalation persists,
+            // so if the pin is switched away again the next decision arms
+            // the next, longer cooldown instead of handing out a fresh
+            // immediate budget just because old attempts left the window.
             self.cooldownUntil = nil
             return .allow
         }
-        if restoreTimes.count < Self.immediateBudget {
+        if escalationLevel == 0, restoreTimes.count < Self.immediateBudget {
             return .allow
         }
-        let overBudget = restoreTimes.count - Self.immediateBudget
-        let duration = min(Self.maxCooldown, Self.baseCooldown * pow(2.0, Double(overBudget)))
+        let duration = min(
+            Self.maxCooldown, Self.baseCooldown * pow(2.0, Double(escalationLevel))
+        )
+        escalationLevel = min(escalationLevel + 1, Self.maxEscalationLevel)
         let until = now.addingTimeInterval(duration)
         cooldownUntil = until
         return .cooldown(until: until)
@@ -116,11 +134,13 @@ struct RestoreThrottle: Equatable, Sendable {
     mutating func recordStableObservation(at now: Date) {
         guard let last = restoreTimes.last else {
             cooldownUntil = nil
+            escalationLevel = 0
             return
         }
         if now.timeIntervalSince(last) >= Self.quietReset {
             restoreTimes.removeAll()
             cooldownUntil = nil
+            escalationLevel = 0
         }
     }
 
@@ -129,6 +149,7 @@ struct RestoreThrottle: Equatable, Sendable {
     mutating func reset() {
         restoreTimes.removeAll()
         cooldownUntil = nil
+        escalationLevel = 0
     }
 
     private func recentCount(now: Date) -> Int {
