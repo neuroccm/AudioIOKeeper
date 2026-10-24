@@ -2,9 +2,7 @@ import Foundation
 import Observation
 import OSLog
 
-/// One entry in the visible activity log, so the user can always see exactly
-/// what the keeper did and when — an app that overrides system behavior must
-/// never act invisibly.
+/// One entry in the visible activity log: the keeper never acts invisibly.
 struct ActivityEntry: Identifiable, Sendable {
     let id = UUID()
     let date: Date
@@ -34,7 +32,6 @@ final class AppModel {
     @ObservationIgnored private var throttles: [AudioDirection: RestoreThrottle] = [:]
     /// Newest applied worker sequence; stale snapshots are rejected.
     @ObservationIgnored private var lastAppliedSequence: UInt64 = 0
-    @ObservationIgnored private var adoptedInitialPins = false
     @ObservationIgnored private var started = false
 
     @ObservationIgnored private var pingTask: Task<Void, Never>?
@@ -42,6 +39,7 @@ final class AppModel {
     @ObservationIgnored private var reconcilePending = false
     @ObservationIgnored private var reconcileReason = "after a system change"
     @ObservationIgnored private var retryTasks: [AudioDirection: Task<Void, Never>] = [:]
+    @ObservationIgnored private var selectionTasks: [AudioDirection: Task<Void, Never>] = [:]
     @ObservationIgnored private var resumeTask: Task<Void, Never>?
 
     /// How long the Settings "temporarily unlock" lasts.
@@ -113,10 +111,7 @@ final class AppModel {
             currentDefaultUID[direction] = snapshot.defaultUID(for: direction)
         }
 
-        if !adoptedInitialPins {
-            adoptedInitialPins = true
-            adoptCurrentDefaultsAsInitialPins()
-        }
+        adoptCurrentDefaultsAsInitialPins()
 
         // Expired pause ends here even if its wake-up task was lost to sleep.
         if settings.pausedUntil() != nil, !isPaused {
@@ -128,18 +123,19 @@ final class AppModel {
         }
     }
 
-    /// On the very first launch only, adopt the current defaults as pins so
-    /// "keep what I have" works out of the box. Never again: a user who later
-    /// unpinned a direction must find it still unpinned after relaunch.
+    /// First-launch adoption, per direction. An unreadable default stays
+    /// pending; a completed direction is never re-adopted (unpins stick).
     private func adoptCurrentDefaultsAsInitialPins() {
-        guard !settings.didAdoptInitialPins() else { return }
-        settings.setDidAdoptInitialPins()
-        for direction in AudioDirection.allCases where settings.pinnedUID(for: direction) == nil {
-            if let uid = currentUID(for: direction),
-               let device = devices.first(where: { $0.uid == uid }) {
-                settings.setPin(uid: device.uid, name: device.name, for: direction)
-                log("Pinned current \(direction.displayName.lowercased()) “\(device.name)”")
+        for direction in AudioDirection.allCases where !settings.didAdoptInitialPin(for: direction) {
+            if settings.pinnedUID(for: direction) != nil {
+                settings.setDidAdoptInitialPin(for: direction)
+                continue
             }
+            guard let uid = currentUID(for: direction),
+                  let device = devices.first(where: { $0.uid == uid }) else { continue }
+            settings.setPin(uid: device.uid, name: device.name, for: direction)
+            settings.setDidAdoptInitialPin(for: direction)
+            log("Pinned current \(direction.displayName.lowercased()) “\(device.name)”")
         }
     }
 
@@ -229,23 +225,24 @@ final class AppModel {
 
     // MARK: - User actions
 
-    /// Pins a device and uses it right away: the pin *is* the lock, so
-    /// pinning also turns keeping on for that direction (a blue pin that
-    /// does not enforce would be a lie). The pin is stored first, so any
-    /// reconcile already in flight decides against the new pin.
+    /// Pins and uses a device right away. The pin *is* the lock, so pinning
+    /// also turns keeping on; the pin is stored before any reconcile runs.
     func selectDevice(_ device: AudioDevice, for direction: AudioDirection) {
         settings.setPin(uid: device.uid, name: device.name, for: direction)
         settings.setKeepingEnabled(true, for: direction)
         throttles[direction]?.reset()
         retryTasks[direction]?.cancel()
         log("Pinned \(direction.displayName.lowercased()) to “\(device.name)”")
-        Task { @MainActor [weak self] in
-            guard let self else { return }
+        selectionTasks[direction]?.cancel()
+        selectionTasks[direction] = Task { @MainActor [weak self] in
+            // Unpinned (or re-pinned) before this ran: switch nothing.
+            guard let self, !Task.isCancelled else { return }
             let result = await worker.setDefaultDevice(uid: device.uid, for: direction)
             if result.sequence > lastAppliedSequence {
                 lastAppliedSequence = result.sequence
             }
-            if result.succeeded {
+            // A stale completion must not claim current for a changed pin.
+            if result.succeeded, settings.pinnedUID(for: direction) == device.uid {
                 currentDefaultUID[direction] = device.uid
             }
             requestReconcile(reason: "after selecting a device")
@@ -269,8 +266,10 @@ final class AppModel {
         let name = pinnedName(for: direction) ?? "pinned device"
         settings.setPin(uid: nil, name: nil, for: direction)
         settings.setKeepingEnabled(false, for: direction)
+        settings.setDidAdoptInitialPin(for: direction)
         throttles[direction]?.reset()
         retryTasks[direction]?.cancel()
+        selectionTasks[direction]?.cancel()
         log("Unpinned \(direction.displayName.lowercased()) “\(name)” — macOS may switch freely")
     }
 
@@ -282,9 +281,7 @@ final class AppModel {
         if enabled { requestReconcile(reason: "after enabling keeping") }
     }
 
-    /// Temporarily unlocks both pins so macOS may switch freely, without
-    /// unpinning anything. In-app selections still apply immediately; only
-    /// automatic restores hold off. The deadline is persisted.
+    /// Temporarily unlocks both pins; only automatic restores hold off.
     func pauseKeeping(for duration: TimeInterval = AppModel.defaultPauseDuration) {
         let until = now().addingTimeInterval(duration)
         settings.setPausedUntil(until)
@@ -330,8 +327,10 @@ final class AppModel {
         currentDefaultUID[direction] ?? nil
     }
 
+    // Settings-backed accessors read settingsRevision so views refresh.
     func pinnedUID(for direction: AudioDirection) -> String? {
-        settings.pinnedUID(for: direction)
+        _ = settingsRevision
+        return settings.pinnedUID(for: direction)
     }
 
     func pinnedName(for direction: AudioDirection) -> String? {
@@ -340,13 +339,16 @@ final class AppModel {
     }
 
     func keepingEnabled(for direction: AudioDirection) -> Bool {
-        settings.keepingEnabled(for: direction)
+        _ = settingsRevision
+        return settings.keepingEnabled(for: direction)
     }
 
-    /// The persisted temporary-unlock deadline, if any.
+    /// The persisted temporary-unlock deadline, if any. Views read it
+    /// alongside `isPaused`, which is the accessor tracking the revision.
     var pausedUntil: Date? { settings.pausedUntil() }
 
     var isPaused: Bool {
+        _ = settingsRevision
         guard let until = settings.pausedUntil() else { return false }
         return until > now()
     }
@@ -355,13 +357,11 @@ final class AppModel {
         throttles[direction]?.isConflicting(now: now()) ?? false
     }
 
-    /// Bumped whenever persisted settings change, so SwiftUI views that read
-    /// settings through this model refresh.
+    /// Bumped whenever persisted settings change (see accessor note above).
     private(set) var settingsRevision = 0
 
     func status(for direction: AudioDirection) -> DirectionStatus {
-        _ = settingsRevision
-        return DirectionStatus.status(
+        DirectionStatus.status(
             keepingEnabled: keepingEnabled(for: direction),
             pinnedUID: pinnedUID(for: direction),
             currentUID: currentUID(for: direction),

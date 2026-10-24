@@ -24,6 +24,8 @@ struct SettingsStore: @unchecked Sendable {
         static let pinnedOutputName = "pinnedOutputDeviceName"
         static let pausedUntil = "keepingPausedUntil"
         static let didAdoptInitialPins = "didAdoptInitialPins"
+        static let didAdoptInitialInputPin = "didAdoptInitialInputPin"
+        static let didAdoptInitialOutputPin = "didAdoptInitialOutputPin"
     }
 
     func keepingEnabled(for direction: AudioDirection) -> Bool {
@@ -73,6 +75,20 @@ struct SettingsStore: @unchecked Sendable {
 
     func setDidAdoptInitialPins() {
         defaults.set(true, forKey: Key.didAdoptInitialPins)
+    }
+
+    /// Per-direction adoption: a direction whose default was unreadable on
+    /// the first snapshot stays pending and can still be adopted later,
+    /// while a completed direction is never adopted again. Falls back to
+    /// the legacy global marker so installs that set it stay settled.
+    func didAdoptInitialPin(for direction: AudioDirection) -> Bool {
+        let key = direction == .input ? Key.didAdoptInitialInputPin : Key.didAdoptInitialOutputPin
+        return defaults.object(forKey: key) as? Bool ?? didAdoptInitialPins()
+    }
+
+    func setDidAdoptInitialPin(for direction: AudioDirection) {
+        let key = direction == .input ? Key.didAdoptInitialInputPin : Key.didAdoptInitialOutputPin
+        defaults.set(true, forKey: key)
     }
 
     func setPin(uid: String?, name: String?, for direction: AudioDirection) {
