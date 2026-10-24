@@ -21,9 +21,10 @@ Install
 Using it
 --------
 - Click the waveform icon in the menu bar.
-- Pick the output and input devices you want to keep. Picking a device pins
-  it and makes it the system default immediately. "Keep" can be switched
-  off per direction.
+- Each device has a pin beside it. Click a pin to lock that device in:
+  the pin turns blue and the device is used immediately. Click the blue
+  pin again (or right-click the device) to unpin/unlock it. Clicking a
+  device name also uses and pins it.
 - On first launch the app adopts whatever macOS is already using as the
   initial pins, so "keep what I have" works right away.
 - If a pinned device disconnects, nothing breaks: macOS uses its fallback

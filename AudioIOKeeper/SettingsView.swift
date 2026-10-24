@@ -7,24 +7,32 @@ struct SettingsView: View {
         @Bindable var model = model
 
         Form {
-            Section("Keeping") {
-                Toggle("Keep output device fixed", isOn: keepingBinding(.output))
-                Toggle("Keep input device fixed", isOn: keepingBinding(.input))
-                Text("When keeping is on, Audio IO Keeper restores your pinned device "
-                     + "whenever macOS switches the default on its own — for example when "
-                     + "AirPods are taken out or a nearby iPhone offers itself as a mic.")
+            Section("Locked devices") {
+                LabeledContent("Output pinned to", value: model.pinnedName(for: .output) ?? "Nothing (not locked)")
+                LabeledContent("Input pinned to", value: model.pinnedName(for: .input) ?? "Nothing (not locked)")
+                Text("A pinned device is locked in as the one being used: if macOS "
+                     + "switches away on its own (AirPods taken out, a nearby iPhone "
+                     + "offering itself as a mic…), Audio IO Keeper switches straight "
+                     + "back. To pin or unpin, use the pin beside each device in the "
+                     + "menu-bar popover — blue pin means locked. Click the blue pin "
+                     + "again to unlock.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 if model.isPaused, let until = model.pausedUntil {
-                    LabeledContent("Keeping paused until", value: until.formatted(date: .omitted, time: .shortened))
-                    Button("Resume keeping now") { model.resumeKeeping() }
+                    LabeledContent(
+                        "Pins temporarily unlocked until",
+                        value: until.formatted(date: .omitted, time: .shortened)
+                    )
+                    Button("Lock pins now") { model.resumeKeeping() }
                 } else {
-                    Button("Pause keeping for \(Int(AppModel.defaultPauseDuration / 60)) minutes") {
+                    Button("Temporarily unlock pins for \(Int(AppModel.defaultPauseDuration / 60)) minutes") {
                         model.pauseKeeping()
                     }
                 }
-                Text("Pausing lets macOS switch freely for a while — handy for one call "
-                     + "on AirPods — then keeping resumes and restores your pins automatically.")
+                Text("“Temporarily unlock” means: for the next \(Int(AppModel.defaultPauseDuration / 60)) minutes "
+                     + "macOS may switch devices freely and nothing is switched back — "
+                     + "handy for one call on AirPods. When the time is up, your pins "
+                     + "lock again automatically and are restored.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -75,12 +83,6 @@ struct SettingsView: View {
         .frame(width: 420)
     }
 
-    private func keepingBinding(_ direction: AudioDirection) -> Binding<Bool> {
-        Binding(
-            get: { model.keepingEnabled(for: direction) },
-            set: { model.setKeepingEnabled($0, for: direction) }
-        )
-    }
 }
 
 private extension Bundle {

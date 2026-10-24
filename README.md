@@ -10,8 +10,10 @@ macOS moves a default on its own, moves it straight back.
 
 ## How it works
 
-- You pick an output and an input device in the menu-bar popover. That choice
-  is the pin, and it takes effect immediately.
+- Each device in the menu-bar popover has a pin beside it. Click a device's
+  pin to lock it in: the pin turns blue, that device is used right away, and
+  it stays locked. Click the blue pin again (or right-click the device) to
+  unpin/unlock it. Clicking a device name also uses and pins it.
 - The app listens for Core Audio default-device changes. If a default drifts
   away from your pin (AirPods removed, Continuity iPhone mic appearing, a new
   display grabbing audio…), it is restored right away.
@@ -28,11 +30,13 @@ macOS moves a default on its own, moves it straight back.
 - Moving between docks or hubs? The **Rescan** button (popover header, and
   in Settings) re-reads the connected devices and re-checks your pins, for
   the rare cases where a hot-plug change was missed.
-- Keeping can be switched off per direction (input/output) at any time.
+- To stop locking a direction, click its blue pin again. The device in use
+  does not change; macOS may switch freely from then on.
 - Need macOS to switch just this once — AirPods in for a single call?
-  **Pause 15 min** (popover, and in Settings) suspends keeping in both
-  directions without unpinning anything, then resumes and restores your
-  pins automatically. The deadline survives a relaunch.
+  Settings → **Temporarily unlock pins for 15 minutes** leaves your pins
+  chosen but not enforced for 15 minutes, then locks and restores them
+  automatically. The deadline survives a relaunch, and the popover shows a
+  "Lock pins now" button while it runs.
 - Every action the keeper takes is shown in the popover's activity log. An app
   that overrides system behavior should never act invisibly.
 

@@ -11,20 +11,11 @@ struct ActivityEntry: Identifiable, Sendable {
     let message: String
 }
 
-/// The app's single source of truth.
-///
-/// Owns the hardware worker, mirrors the current system state, holds the
-/// user's pins, and enforces them: whenever the system default drifts from a
-/// pin while keeping is enabled (AirPods removed, Continuity camera/mic
-/// appearing, …) the pin is restored. Changes made *in this app* update the
-/// pin instead, so the keeper never fights its own user.
-///
-/// All Core Audio work happens on the worker's serial queue; this model
-/// only ever awaits snapshots, so a stalled HAL call cannot freeze the UI.
-/// If something else keeps switching a default back, per-direction
-/// throttling (`RestoreThrottle`) rate-limits restores with growing
-/// cooldowns and surfaces the conflict instead of thrashing the audio
-/// subsystem switch-for-switch.
+/// The app's single source of truth: owns the worker, mirrors system
+/// state, holds the pins, and restores a pin whenever the system default
+/// drifts from it. In-app changes update the pin instead, so the keeper
+/// never fights its own user. All Core Audio work stays on the worker's
+/// queue; a competing switcher is throttled (`RestoreThrottle`), not fought.
 @MainActor
 @Observable
 final class AppModel {
@@ -41,9 +32,7 @@ final class AppModel {
 
     @ObservationIgnored private var currentDefaultUID: [AudioDirection: String?] = [:]
     @ObservationIgnored private var throttles: [AudioDirection: RestoreThrottle] = [:]
-    /// Newest worker sequence applied to this model's state. Snapshots that
-    /// resolve out of order (a slow read finishing after a newer write) are
-    /// rejected so stale data cannot overwrite fresher state.
+    /// Newest applied worker sequence; stale snapshots are rejected.
     @ObservationIgnored private var lastAppliedSequence: UInt64 = 0
     @ObservationIgnored private var adoptedInitialPins = false
     @ObservationIgnored private var started = false
@@ -55,9 +44,7 @@ final class AppModel {
     @ObservationIgnored private var retryTasks: [AudioDirection: Task<Void, Never>] = [:]
     @ObservationIgnored private var resumeTask: Task<Void, Never>?
 
-    /// How long "Pause keeping" lasts: long enough for a call or a couple
-    /// of songs on another device, short enough that forgetting about it
-    /// does not leave the keeper off-duty for the day.
+    /// How long the Settings "temporarily unlock" lasts.
     static let defaultPauseDuration: TimeInterval = 15 * 60
 
     init(
@@ -90,10 +77,7 @@ final class AppModel {
         requestReconcile(reason: "at launch")
     }
 
-    /// Manually re-reads the connected devices and re-checks the pins.
-    /// Core Audio normally announces hot-plug changes, but moving between
-    /// docks/hubs (or waking) can occasionally leave clients with a stale
-    /// picture; the rescan button forces a fresh snapshot.
+    /// Forces a fresh hardware snapshot (docks/hubs can leave a stale one).
     func rescanDevices() {
         log("Rescanning connected devices…")
         requestReconcile(reason: "after a manual rescan")
@@ -134,9 +118,7 @@ final class AppModel {
             adoptCurrentDefaultsAsInitialPins()
         }
 
-        // A pause whose deadline has passed ends here even if its wake-up
-        // task never fired (system sleep can overrun a timer): expiry is
-        // decided against the clock, the task only makes it prompt.
+        // Expired pause ends here even if its wake-up task was lost to sleep.
         if settings.pausedUntil() != nil, !isPaused {
             resumeKeeping()
         }
@@ -146,10 +128,12 @@ final class AppModel {
         }
     }
 
-    /// On first launch there is no pin yet. Adopting whatever the system is
-    /// already using means "keep what I have" works out of the box without
-    /// changing anything on the system.
+    /// On the very first launch only, adopt the current defaults as pins so
+    /// "keep what I have" works out of the box. Never again: a user who later
+    /// unpinned a direction must find it still unpinned after relaunch.
     private func adoptCurrentDefaultsAsInitialPins() {
+        guard !settings.didAdoptInitialPins() else { return }
+        settings.setDidAdoptInitialPins()
         for direction in AudioDirection.allCases where settings.pinnedUID(for: direction) == nil {
             if let uid = currentUID(for: direction),
                let device = devices.first(where: { $0.uid == uid }) {
@@ -245,12 +229,13 @@ final class AppModel {
 
     // MARK: - User actions
 
-    /// The user picked a device in this app: it becomes the new pin and the
-    /// new system default, effective immediately. The pin is stored first,
-    /// so any reconcile already in flight decides against the new pin and
-    /// can never restore the previous one over the user's choice.
+    /// Pins a device and uses it right away: the pin *is* the lock, so
+    /// pinning also turns keeping on for that direction (a blue pin that
+    /// does not enforce would be a lie). The pin is stored first, so any
+    /// reconcile already in flight decides against the new pin.
     func selectDevice(_ device: AudioDevice, for direction: AudioDirection) {
         settings.setPin(uid: device.uid, name: device.name, for: direction)
+        settings.setKeepingEnabled(true, for: direction)
         throttles[direction]?.reset()
         retryTasks[direction]?.cancel()
         log("Pinned \(direction.displayName.lowercased()) to “\(device.name)”")
@@ -267,6 +252,28 @@ final class AppModel {
         }
     }
 
+    /// Pin-button action: locks an unpinned device, unlocks the locked one.
+    func togglePin(_ device: AudioDevice, for direction: AudioDirection) {
+        let isLocked = settings.pinnedUID(for: direction) == device.uid
+            && settings.keepingEnabled(for: direction)
+        if isLocked {
+            unpinDevice(for: direction)
+        } else {
+            selectDevice(device, for: direction)
+        }
+    }
+
+    /// Unlocks without switching: the device in use stays in use.
+    func unpinDevice(for direction: AudioDirection) {
+        guard settings.pinnedUID(for: direction) != nil else { return }
+        let name = pinnedName(for: direction) ?? "pinned device"
+        settings.setPin(uid: nil, name: nil, for: direction)
+        settings.setKeepingEnabled(false, for: direction)
+        throttles[direction]?.reset()
+        retryTasks[direction]?.cancel()
+        log("Unpinned \(direction.displayName.lowercased()) “\(name)” — macOS may switch freely")
+    }
+
     func setKeepingEnabled(_ enabled: Bool, for direction: AudioDirection) {
         settings.setKeepingEnabled(enabled, for: direction)
         throttles[direction]?.reset()
@@ -275,13 +282,9 @@ final class AppModel {
         if enabled { requestReconcile(reason: "after enabling keeping") }
     }
 
-    /// Pauses keeping in both directions for a while, so macOS may switch
-    /// freely (AirPods in for one call) without unpinning anything.
-    /// Pins, toggles, and explicit in-app selections are unaffected — a
-    /// device picked here still applies immediately; only automatic
-    /// restores hold off. The deadline is persisted, so relaunching
-    /// mid-pause does not silently resume, and any drift during the pause
-    /// is the user's own business, never counted as a conflict.
+    /// Temporarily unlocks both pins so macOS may switch freely, without
+    /// unpinning anything. In-app selections still apply immediately; only
+    /// automatic restores hold off. The deadline is persisted.
     func pauseKeeping(for duration: TimeInterval = AppModel.defaultPauseDuration) {
         let until = now().addingTimeInterval(duration)
         settings.setPausedUntil(until)
@@ -293,8 +296,7 @@ final class AppModel {
         log("Paused keeping for \(Int(duration / 60)) minutes — macOS may switch freely")
     }
 
-    /// Ends a pause (manually, on expiry, or when the wake-up task fires)
-    /// and immediately re-checks the pins, restoring any that drifted.
+    /// Ends a temporary unlock and re-checks the pins at once.
     func resumeKeeping() {
         guard settings.pausedUntil() != nil else { return }
         settings.setPausedUntil(nil)
@@ -341,8 +343,7 @@ final class AppModel {
         settings.keepingEnabled(for: direction)
     }
 
-    /// The persisted pause deadline, past or future; `isPaused` gives it
-    /// meaning against the clock.
+    /// The persisted temporary-unlock deadline, if any.
     var pausedUntil: Date? { settings.pausedUntil() }
 
     var isPaused: Bool {
@@ -382,8 +383,7 @@ final class AppModel {
         AudioDirection.allCases.contains { keepingEnabled(for: $0) }
     }
 
-    /// `isKeepingAnything` with an active pause netted out, for the menu
-    /// bar icon: a paused keeper is off-duty and should look it.
+    /// `isKeepingAnything` minus an active temporary unlock (menu bar icon).
     var isActivelyKeepingAnything: Bool {
         isKeepingAnything && !isPaused
     }
