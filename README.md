@@ -18,6 +18,16 @@ macOS moves a default on its own, moves it straight back.
 - If your pinned device disconnects, nothing is forced and nothing breaks:
   macOS uses its own fallback, the app shows a warning state, and your pin is
   restored the moment the device comes back.
+- If something else keeps switching a default back (another utility, an
+  automation), the keeper does not fight it switch-for-switch: after a few
+  immediate restores it backs off with growing cooldowns (2 s up to 60 s),
+  retries periodically, and shows a conflict state in the popover. During
+  such a conflict restoration is deliberately *not* instant — that
+  qualifies the "restored right away" behavior above, which applies to
+  ordinary one-off switches.
+- Moving between docks or hubs? The **Rescan** button (popover header, and
+  in Settings) re-reads the connected devices and re-checks your pins, for
+  the rare cases where a hot-plug change was missed.
 - Keeping can be switched off per direction (input/output) at any time.
 - Every action the keeper takes is shown in the popover's activity log. An app
   that overrides system behavior should never act invisibly.
@@ -74,7 +84,8 @@ xcodebuild test -scheme AudioIOKeeper -destination 'platform=macOS' CODE_SIGNING
 | --- | --- |
 | `AudioIOKeeperApp.swift` | App entry point, menu-bar scene, launch-time keeper start |
 | `AppModel.swift` | Single source of truth (`@Observable`, `@MainActor`) — state, enforcement, activity log |
-| `KeeperEngine.swift` | Pure, hardware-free decision logic (restore or leave alone) |
+| `KeeperEngine.swift` | Pure, hardware-free decision logic: restore-or-not, plus the anti-thrash `RestoreThrottle` |
+| `AudioHardwareWorker.swift` | Serializes all HAL calls on a dedicated queue off the main thread; coalesced change pings; sequenced snapshots so stale reads can't overwrite newer writes |
 | `AudioHardwareClient.swift` | The one place that talks to Core Audio (behind a protocol for testing) |
 | `SettingsStore.swift` | Typed `UserDefaults` access; pins stored as persistent device UIDs |
 | `MenuContentView.swift` / `SettingsView.swift` | SwiftUI popover and Settings window |
@@ -85,7 +96,11 @@ Design notes:
 - Devices are identified by their persistent Core Audio **UID**, never by the
   volatile `AudioDeviceID`, so pins survive reboots and reconnects.
 - Enforcement is loop-free by construction: restoring a pin fires a change
-  notification, but the engine sees "current == pin" and does nothing.
+  notification, but the engine sees "current == pin" and does nothing. A
+  *competing* writer is handled by `RestoreThrottle`: bounded immediate
+  restores, then exponential cooldowns with a visible conflict state.
+- No synchronous Core Audio call ever runs on the main thread, so a stalled
+  driver can't freeze the menu or the Quit button.
 - Swift 6 with complete strict-concurrency checking.
 
 ## Contributing

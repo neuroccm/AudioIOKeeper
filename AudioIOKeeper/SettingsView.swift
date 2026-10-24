@@ -17,6 +17,14 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Devices") {
+                Button("Rescan connected devices") { model.rescanDevices() }
+                Text("Use after moving between docks or hubs if a previously "
+                     + "connected device does not show up.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Startup") {
                 Toggle("Launch at login", isOn: $model.launchAtLogin)
             }

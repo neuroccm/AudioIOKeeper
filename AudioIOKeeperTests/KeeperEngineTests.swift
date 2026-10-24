@@ -66,6 +66,102 @@ final class KeeperEngineTests: XCTestCase {
     }
 }
 
+final class RestoreThrottleTests: XCTestCase {
+    private let t0 = Date(timeIntervalSince1970: 1_000_000)
+
+    func testImmediateBudgetIsAllowed() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            XCTAssertEqual(throttle.decision(now: t0), .allow)
+            throttle.recordRestore(at: t0)
+        }
+    }
+
+    func testBudgetExhaustionEntersCooldown() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        let expected = t0.addingTimeInterval(RestoreThrottle.baseCooldown)
+        XCTAssertEqual(throttle.decision(now: t0), .cooldown(until: expected))
+        // Still cooling down just before the deadline.
+        let during = t0.addingTimeInterval(RestoreThrottle.baseCooldown - 0.1)
+        XCTAssertEqual(throttle.decision(now: during), .cooldown(until: expected))
+        XCTAssertTrue(throttle.isConflicting(now: t0))
+    }
+
+    func testExactlyOneRetryAfterCooldownThenLongerCooldown() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        _ = throttle.decision(now: t0) // arm first cooldown
+
+        let afterFirst = t0.addingTimeInterval(RestoreThrottle.baseCooldown + 0.1)
+        XCTAssertEqual(throttle.decision(now: afterFirst), .allow, "one retry once the cooldown is served")
+        throttle.recordRestore(at: afterFirst)
+
+        // Next ask is held back for twice as long (exponential growth).
+        let expected = afterFirst.addingTimeInterval(RestoreThrottle.baseCooldown * 2)
+        XCTAssertEqual(throttle.decision(now: afterFirst), .cooldown(until: expected))
+    }
+
+    func testCooldownIsCapped() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<30 { throttle.recordRestore(at: t0) }
+        // Far over budget within the window would need prune-safe history;
+        // simulate instead by arming through repeated allow/record cycles.
+        var time = t0
+        var lastCooldown: TimeInterval = 0
+        for _ in 0..<12 {
+            switch throttle.decision(now: time) {
+            case .allow:
+                throttle.recordRestore(at: time)
+            case .cooldown(let until):
+                lastCooldown = until.timeIntervalSince(time)
+                time = until.addingTimeInterval(0.1)
+                // Keep restores inside the counting window.
+                if time.timeIntervalSince(t0) > RestoreThrottle.window - 1 { break }
+            }
+        }
+        XCTAssertLessThanOrEqual(lastCooldown, RestoreThrottle.maxCooldown)
+    }
+
+    func testQuietPeriodResetsHistory() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        _ = throttle.decision(now: t0)
+        let later = t0.addingTimeInterval(RestoreThrottle.quietReset + 1)
+        throttle.recordStableObservation(at: later)
+        XCTAssertFalse(throttle.isConflicting(now: later))
+        XCTAssertEqual(throttle.decision(now: later), .allow)
+    }
+
+    func testResetClearsConflict() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        _ = throttle.decision(now: t0)
+        throttle.reset()
+        XCTAssertFalse(throttle.isConflicting(now: t0))
+        XCTAssertEqual(throttle.decision(now: t0), .allow)
+    }
+
+    func testConflictStatusSurfaces() {
+        let status = DirectionStatus.status(
+            keepingEnabled: true,
+            pinnedUID: "speakers",
+            currentUID: "airpods",
+            availableUIDs: ["speakers", "airpods"],
+            inConflict: true
+        )
+        XCTAssertEqual(status, .conflicted)
+    }
+}
+
 final class DirectionStatusTests: XCTestCase {
 
     func testWaitingWhenPinnedDeviceGone() {

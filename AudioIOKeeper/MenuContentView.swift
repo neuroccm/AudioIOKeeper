@@ -35,6 +35,14 @@ struct MenuContentView: View {
                     .foregroundStyle(.secondary)
             }
             Spacer()
+            Button {
+                model.rescanDevices()
+            } label: {
+                Label("Rescan", systemImage: "arrow.clockwise")
+            }
+            .controlSize(.small)
+            .help("Re-read the connected audio devices (useful after moving between docks or hubs)")
+            .accessibilityLabel("Rescan connected devices")
         }
     }
 
@@ -134,6 +142,7 @@ private struct DirectionSection: View {
         case .notKeeping: "Keeping off — macOS may switch freely"
         case .kept: "Keeping “\(pinnedName)”"
         case .restoring: "Restoring “\(pinnedName)”…"
+        case .conflicted: "Something keeps switching this — backing off and retrying periodically"
         case .waitingForPinnedDevice: "“\(pinnedName)” is disconnected — will restore on return"
         case .noPinSelected: "Pick a device below to keep it"
         }
@@ -144,6 +153,7 @@ private struct DirectionSection: View {
         case .notKeeping: "lock.open"
         case .kept: "lock.fill"
         case .restoring: "arrow.triangle.2.circlepath"
+        case .conflicted: "exclamationmark.shield.fill"
         case .waitingForPinnedDevice: "exclamationmark.triangle.fill"
         case .noPinSelected: "questionmark.circle"
         }
@@ -152,6 +162,7 @@ private struct DirectionSection: View {
     private func statusColor(_ status: DirectionStatus) -> Color {
         switch status {
         case .kept: .green
+        case .conflicted: .red
         case .waitingForPinnedDevice: .orange
         case .restoring: .blue
         case .notKeeping, .noPinSelected: .secondary
