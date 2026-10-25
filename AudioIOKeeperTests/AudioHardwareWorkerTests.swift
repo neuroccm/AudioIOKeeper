@@ -1,6 +1,70 @@
 import XCTest
 @testable import AudioIOKeeper
 
+/// Holds a default read or write so cancellation can race a submitted HAL
+/// operation deterministically, without blocking the main actor.
+final class GatedDeviceClient: AudioHardwareClient, @unchecked Sendable {
+    enum GatePoint { case read, write }
+
+    private let lock = NSLock()
+    private let gate = DispatchSemaphore(value: 0)
+    private var nextGate: GatePoint?
+    private var held = false
+    private var defaults: [AudioDirection: String] = [.output: "speakers", .input: "usb-mic"]
+    private var writes: [(uid: String, direction: AudioDirection)] = []
+
+    let devices = [
+        AudioDevice(objectID: 1, uid: "speakers", name: "Speakers", transport: .builtIn,
+                    hasInput: false, hasOutput: true, isAlive: true),
+        AudioDevice(objectID: 2, uid: "airpods", name: "AirPods", transport: .bluetooth,
+                    hasInput: true, hasOutput: true, isAlive: true),
+        AudioDevice(objectID: 3, uid: "usb-mic", name: "USB Mic", transport: .usb,
+                    hasInput: true, hasOutput: false, isAlive: true)
+    ]
+
+    var isHeld: Bool { locked { held } }
+    var setDefaultCalls: [(uid: String, direction: AudioDirection)] { locked { writes } }
+
+    func holdNextOutputOperation(at point: GatePoint) { locked { nextGate = point } }
+    func release() { gate.signal() }
+    func allDevices() -> [AudioDevice] { devices }
+    func addChangeListener(_ handler: @escaping @Sendable () -> Void) {}
+
+    func defaultDeviceUID(for direction: AudioDirection) -> String? {
+        let uid = locked { defaults[direction] }
+        waitIfNeeded(at: .read, for: direction)
+        return uid
+    }
+
+    @discardableResult
+    func setDefaultDevice(uid: String, for direction: AudioDirection) -> Bool {
+        waitIfNeeded(at: .write, for: direction)
+        locked {
+            writes.append((uid, direction))
+            defaults[direction] = uid
+        }
+        return true
+    }
+
+    private func waitIfNeeded(at point: GatePoint, for direction: AudioDirection) {
+        let shouldHold = locked {
+            guard direction == .output, nextGate == point else { return false }
+            nextGate = nil
+            held = true
+            return true
+        }
+        guard shouldHold else { return }
+        gate.wait()
+        locked { held = false }
+    }
+
+    private func locked<T>(_ body: () -> T) -> T {
+        lock.lock()
+        defer { lock.unlock() }
+        return body()
+    }
+}
+
 /// Fake HAL client whose listener registration blocks until released,
 /// modeling a HAL stall during `AudioObjectAddPropertyListenerBlock`.
 /// Registration must happen on the worker queue: if `start()` ever calls

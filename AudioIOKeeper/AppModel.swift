@@ -124,10 +124,11 @@ final class AppModel {
     }
 
     /// First-launch adoption, per direction. An unreadable default stays
-    /// pending; a completed direction is never re-adopted (unpins stick).
+    /// pending; disabled keeping completes without a pin. A completed
+    /// direction is never re-adopted (unpins stick).
     private func adoptCurrentDefaultsAsInitialPins() {
         for direction in AudioDirection.allCases where !settings.didAdoptInitialPin(for: direction) {
-            if settings.pinnedUID(for: direction) != nil {
+            if settings.pinnedUID(for: direction) != nil || !settings.keepingEnabled(for: direction) {
                 settings.setDidAdoptInitialPin(for: direction)
                 continue
             }
@@ -242,7 +243,7 @@ final class AppModel {
                 lastAppliedSequence = result.sequence
             }
             // A stale completion must not claim current for a changed pin.
-            if result.succeeded, settings.pinnedUID(for: direction) == device.uid {
+            if !Task.isCancelled, result.succeeded, settings.pinnedUID(for: direction) == device.uid {
                 currentDefaultUID[direction] = device.uid
             }
             requestReconcile(reason: "after selecting a device")
@@ -262,6 +263,7 @@ final class AppModel {
 
     /// Unlocks without switching: the device in use stays in use.
     func unpinDevice(for direction: AudioDirection) {
+        selectionTasks.removeValue(forKey: direction)?.cancel()
         guard settings.pinnedUID(for: direction) != nil else { return }
         let name = pinnedName(for: direction) ?? "pinned device"
         settings.setPin(uid: nil, name: nil, for: direction)
@@ -269,7 +271,6 @@ final class AppModel {
         settings.setDidAdoptInitialPin(for: direction)
         throttles[direction]?.reset()
         retryTasks[direction]?.cancel()
-        selectionTasks[direction]?.cancel()
         log("Unpinned \(direction.displayName.lowercased()) “\(name)” — macOS may switch freely")
     }
 

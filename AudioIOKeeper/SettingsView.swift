@@ -101,7 +101,7 @@ struct SettingsView: View {
                 Text(name)
                     .foregroundStyle(.secondary)
                 Button("Unpin") { model.unpinDevice(for: direction) }
-                    .accessibilityLabel("Unpin \(name)")
+                    .accessibilityLabel("Unpin \(direction.displayName) \(name)")
             }
         } else {
             LabeledContent(label, value: "Nothing (not locked)")

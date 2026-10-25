@@ -148,6 +148,90 @@ final class AppModelPinTests: XCTestCase {
         XCTAssertNil(fresh.pinnedUID(for: .output), "the user's unpin must not be undone by adoption")
     }
 
+    func testDisabledDirectionCompletesAdoptionWithoutPinningEvenAfterRelaunch() async throws {
+        let localSuite = "Adoption-\(UUID().uuidString)"
+        let localDefaults = UserDefaults(suiteName: localSuite)!
+        defer { localDefaults.removePersistentDomain(forName: localSuite) }
+        let localSettings = SettingsStore(defaults: localDefaults)
+        localSettings.setKeepingEnabled(false, for: .input)
+        let localWorker = FakeAudioHardwareWorker()
+        localWorker.devices = worker.devices
+        localWorker.setSystemDefault("speakers", for: .output)
+        // Disabled input must complete adoption even without a readable default.
+        let fresh = AppModel(worker: localWorker, settings: localSettings)
+        fresh.start()
+        try await settle { fresh.pinnedUID(for: .output) == "speakers" }
+
+        XCTAssertTrue(localSettings.didAdoptInitialPin(for: .input))
+        XCTAssertNil(fresh.pinnedUID(for: .input))
+        XCTAssertFalse(fresh.keepingEnabled(for: .input))
+
+        localWorker.setSystemDefault("usb-mic", for: .input)
+        let relaunched = AppModel(worker: localWorker, settings: localSettings)
+        relaunched.start()
+        try await settle { relaunched.currentUID(for: .input) == "usb-mic" }
+        XCTAssertNil(relaunched.pinnedUID(for: .input))
+        XCTAssertFalse(relaunched.keepingEnabled(for: .input))
+        XCTAssertTrue(localWorker.setDefaultCalls.isEmpty)
+
+        relaunched.setKeepingEnabled(true, for: .input)
+        try await settle { relaunched.keepingEnabled(for: .input) }
+        XCTAssertNil(relaunched.pinnedUID(for: .input), "completed adoption must not run when keeping is enabled later")
+    }
+
+    func testUnpinAfterSelectionReachesWorkerSkipsWriteAndPreservesOtherDirection() async throws {
+        try await checkUnpinDuringSelection(at: .read)
+    }
+
+    func testUnpinDuringHALWriteRestoresDeviceThatWasInUse() async throws {
+        try await checkUnpinDuringSelection(at: .write)
+    }
+
+    private func checkUnpinDuringSelection(at point: GatedDeviceClient.GatePoint) async throws {
+        let client = GatedDeviceClient()
+        let serialWorker = AudioHardwareWorker(client: client)
+        let localModel = AppModel(worker: serialWorker, settings: settings)
+        localModel.start()
+        try await settle { localModel.currentUID(for: .output) == "speakers" }
+
+        client.holdNextOutputOperation(at: point)
+        defer { client.release() }
+        let airPods = client.devices.first { $0.uid == "airpods" }!
+        localModel.selectDevice(airPods, for: .output)
+        try await settle { client.isHeld }
+        XCTAssertTrue(client.isHeld, "selection must have reached the worker before unpinning")
+
+        localModel.selectDevice(airPods, for: .input)
+        localModel.unpinDevice(for: .output)
+        client.release()
+
+        let snapshot = await serialWorker.snapshot()
+        try await settle { localModel.currentUID(for: .input) == "airpods" }
+        XCTAssertEqual(snapshot.defaultUID(for: .output), "speakers")
+        XCTAssertEqual(localModel.currentUID(for: .output), "speakers")
+        XCTAssertNil(localModel.pinnedUID(for: .output))
+        XCTAssertFalse(localModel.keepingEnabled(for: .output))
+        XCTAssertEqual(localModel.pinnedUID(for: .input), "airpods")
+        XCTAssertEqual(localModel.currentUID(for: .input), "airpods")
+        XCTAssertTrue(localModel.keepingEnabled(for: .input))
+        XCTAssertEqual(client.setDefaultCalls.filter { $0.direction == .output }.map(\.uid),
+                       point == .read ? [] : ["airpods", "speakers"])
+    }
+
+    func testUnpinAfterCompletedSelectionKeepsSelectedDeviceInUse() async throws {
+        let airPods = worker.devices.first { $0.uid == "airpods" }!
+        model.selectDevice(airPods, for: .output)
+        try await settle { model.currentUID(for: .output) == "airpods" }
+        worker.resetRecordedCalls()
+
+        model.unpinDevice(for: .output)
+        try await settle { model.pinnedUID(for: .output) == nil }
+
+        XCTAssertEqual(worker.systemDefault(for: .output), "airpods")
+        XCTAssertEqual(model.currentUID(for: .output), "airpods")
+        XCTAssertTrue(worker.setDefaultCalls.isEmpty)
+    }
+
     /// Pin then immediately unpin (before the selection switch has run):
     /// the pending switch is cancelled, so unpinning keeps the device
     /// that was in use.
