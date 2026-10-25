@@ -1,7 +1,7 @@
 import SwiftUI
 
-/// The menu bar popover: pick the devices to keep, toggle keeping per
-/// direction, and see what the keeper has done recently.
+/// The menu bar popover: pin (lock) a device per direction by clicking
+/// the pin beside it, and see what the keeper has done recently.
 struct MenuContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
@@ -10,8 +10,8 @@ struct MenuContentView: View {
         VStack(alignment: .leading, spacing: 14) {
             header
 
-            if model.isPaused || model.isKeepingAnything {
-                pauseControls
+            if model.isPaused {
+                pausedBanner
             }
 
             DirectionSection(direction: .output)
@@ -34,7 +34,7 @@ struct MenuContentView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Audio IO Keeper")
                     .font(.headline)
-                Text("Your chosen input & output stay put.")
+                Text("Click the pin beside a device to lock it in. Blue pin = locked.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -50,37 +50,21 @@ struct MenuContentView: View {
         }
     }
 
-    /// One row, two states: offer a timed pause, or show the running
-    /// pause with its deadline and an early exit.
+    /// Shown only while a temporary unlock (started in Settings) is active:
+    /// the pins stay chosen but are not enforced until the deadline.
     @ViewBuilder
-    private var pauseControls: some View {
-        if model.isPaused, let until = model.pausedUntil {
+    private var pausedBanner: some View {
+        if let until = model.pausedUntil {
             HStack(spacing: 6) {
-                Image(systemName: "pause.circle.fill")
+                Image(systemName: "lock.open.fill")
                     .foregroundStyle(.orange)
-                Text("Keeping paused until \(until, format: .dateTime.hour().minute())")
+                Text("Pins temporarily unlocked until \(until, format: .dateTime.hour().minute()) — macOS can switch freely")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
-                Button("Resume now") { model.resumeKeeping() }
+                Button("Lock pins now") { model.resumeKeeping() }
                     .controlSize(.small)
-                    .accessibilityLabel("Resume keeping now")
-            }
-        } else {
-            HStack {
-                Text("Need macOS to switch just this once?")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Spacer()
-                Button {
-                    model.pauseKeeping()
-                } label: {
-                    Label("Pause \(Int(AppModel.defaultPauseDuration / 60)) min", systemImage: "pause.circle")
-                }
-                .controlSize(.small)
-                .help("Let macOS switch devices freely for a while (e.g. AirPods for one call); "
-                      + "keeping then resumes and restores your pins automatically")
-                .accessibilityLabel("Pause keeping for \(Int(AppModel.defaultPauseDuration / 60)) minutes")
+                    .accessibilityLabel("Lock pins now")
             }
         }
     }
@@ -152,9 +136,11 @@ struct MenuContentView: View {
     }
 }
 
-/// One direction's controls: a keeping toggle, the current status, and the
-/// list of devices to pin. Selecting a device pins it and makes it the
-/// system default immediately.
+/// One direction's controls: the current status and the device list.
+/// Every device has its own pin button: blue/filled means that device is
+/// pinned (locked in as the one being used); grey/outline means it is not.
+/// Clicking a grey pin pins and uses that device; clicking the blue pin
+/// again unpins it. Right-clicking a row offers the same pin/unpin action.
 private struct DirectionSection: View {
     @Environment(AppModel.self) private var model
     let direction: AudioDirection
@@ -165,14 +151,6 @@ private struct DirectionSection: View {
                 Label(direction.displayName, systemImage: direction.systemImage)
                     .font(.subheadline.weight(.semibold))
                 Spacer()
-                Toggle("Keep", isOn: keepingBinding)
-                    .toggleStyle(.switch)
-                    .controlSize(.mini)
-                    .labelsHidden()
-                    .accessibilityLabel("Keep \(direction.displayName) fixed")
-                Text("Keep")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             statusLine
@@ -189,13 +167,6 @@ private struct DirectionSection: View {
         }
     }
 
-    private var keepingBinding: Binding<Bool> {
-        Binding(
-            get: { model.keepingEnabled(for: direction) },
-            set: { model.setKeepingEnabled($0, for: direction) }
-        )
-    }
-
     private var statusLine: some View {
         let status = model.status(for: direction)
         let pinned = model.pinnedName(for: direction) ?? "—"
@@ -210,13 +181,12 @@ private struct DirectionSection: View {
 
     private func statusText(_ status: DirectionStatus, pinnedName: String) -> String {
         switch status {
-        case .notKeeping: "Keeping off — macOS may switch freely"
-        case .kept: "Keeping “\(pinnedName)”"
+        case .notKeeping, .noPinSelected: "Not locked — click a pin below to lock a device in"
+        case .kept: "Locked to “\(pinnedName)”"
         case .restoring: "Restoring “\(pinnedName)”…"
         case .conflicted: "Something keeps switching this — backing off and retrying periodically"
         case .waitingForPinnedDevice: "“\(pinnedName)” is disconnected — will restore on return"
-        case .noPinSelected: "Pick a device below to keep it"
-        case .paused: "Paused — macOS may switch freely"
+        case .paused: "Temporarily unlocked — macOS may switch freely"
         }
     }
 
@@ -244,34 +214,72 @@ private struct DirectionSection: View {
 
     private func deviceRow(_ device: AudioDevice) -> some View {
         let isPinned = model.pinnedUID(for: direction) == device.uid
+        let isLocked = isPinned && model.keepingEnabled(for: direction)
         let isCurrent = model.currentUID(for: direction) == device.uid
-        return Button {
-            model.selectDevice(device, for: direction)
-        } label: {
-            HStack(spacing: 8) {
-                Image(systemName: device.transport.systemImage)
-                    .frame(width: 18)
-                    .foregroundStyle(.secondary)
-                Text(device.name)
-                    .lineLimit(1)
-                Spacer()
-                if isPinned {
-                    Image(systemName: "pin.fill")
-                        .font(.caption2)
-                        .foregroundStyle(.tint)
-                        .accessibilityLabel("Pinned")
+        return HStack(spacing: 4) {
+            // Clicking the name uses the device now and pins it.
+            Button {
+                model.selectDevice(device, for: direction)
+            } label: {
+                HStack(spacing: 8) {
+                    Image(systemName: device.transport.systemImage)
+                        .frame(width: 18)
+                        .foregroundStyle(.secondary)
+                    Text(device.name)
+                        .lineLimit(1)
+                        .fontWeight(isLocked ? .semibold : .regular)
+                    if isCurrent {
+                        Image(systemName: "checkmark")
+                            .font(.caption.weight(.bold))
+                            .foregroundStyle(.green)
+                            .accessibilityLabel("Current system default")
+                    }
+                    Spacer()
                 }
-                if isCurrent {
-                    Image(systemName: "checkmark")
-                        .font(.caption.weight(.bold))
-                        .foregroundStyle(.green)
-                        .accessibilityLabel("Current system default")
-                }
+                .contentShape(Rectangle())
             }
-            .contentShape(Rectangle())
-            .padding(.vertical, 2)
+            .buttonStyle(.plain)
+            .help("Use “\(device.name)” now and pin it")
+            .accessibilityLabel("\(device.name)\(isLocked ? ", pinned and locked" : "")\(isCurrent ? ", in use" : "")")
+
+            pinButton(device, isPinned: isPinned, isLocked: isLocked)
+        }
+        .padding(.vertical, 3)
+        .padding(.leading, 6)
+        .background(
+            isLocked ? Color.blue.opacity(0.10) : Color.clear,
+            in: RoundedRectangle(cornerRadius: 6)
+        )
+        .contextMenu {
+            Button {
+                model.togglePin(device, for: direction)
+            } label: {
+                Label(
+                    isLocked ? "Unpin “\(device.name)” (unlock)" : "Pin & lock “\(device.name)”",
+                    systemImage: isLocked ? "pin" : "pin.fill"
+                )
+            }
+        }
+    }
+
+    /// The lock itself: blue and filled when this device is pinned, grey
+    /// and outlined when it is not. Always visible so locking never
+    /// depends on discovering a row click.
+    private func pinButton(_ device: AudioDevice, isPinned: Bool, isLocked: Bool) -> some View {
+        Button {
+            model.togglePin(device, for: direction)
+        } label: {
+            Image(systemName: isPinned ? "pin.fill" : "pin")
+                .font(.body)
+                .foregroundStyle(isLocked ? Color.blue : Color.secondary)
+                .frame(width: 30, height: 24)
+                .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .accessibilityLabel("\(device.name)\(isPinned ? ", pinned" : "")\(isCurrent ? ", current default" : "")")
+        .help(isLocked
+            ? "“\(device.name)” is pinned (locked in). Click to unpin."
+            : "Pin & lock “\(device.name)” so it stays the \(direction.displayName.lowercased()) in use")
+        .accessibilityLabel(isLocked ? "Unpin \(device.name)" : "Pin and lock \(device.name)")
+        .accessibilityValue(isLocked ? "Pinned" : "Not pinned")
     }
 }

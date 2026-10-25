@@ -17,6 +17,7 @@
 		A5F3B00E2CCF1BAD29E9583C /* AudioDevice.swift in Sources */ = {isa = PBXBuildFile; fileRef = 79B078CD5934D57BBD845972 /* AudioDevice.swift */; };
 		AB1E925C25DBF67BBDEC6B0D /* KeeperEngineTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = AD0627817F15A6FBA3991096 /* KeeperEngineTests.swift */; };
 		AFC9FEB0CF38CB131531457A /* MenuContentView.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0140C342E9D7D1A5BF62CA76 /* MenuContentView.swift */; };
+		C299D410694AAB5ACDD75C04 /* AppModelPinTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = F70DC70346167149F5DD299E /* AppModelPinTests.swift */; };
 		D462D7FB1656546F052AB567 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = C7510B1D75FE9C24CA3EED5A /* AppModel.swift */; };
 		E0E1B4CB98002428B5C65415 /* AudioIOKeeperApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0FC63E6D75C66A4927129C27 /* AudioIOKeeperApp.swift */; };
 		E5BC23ABC487E676C7496C80 /* AppModelTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = 7E69B1800C4381B4A704C235 /* AppModelTests.swift */; };
@@ -54,6 +55,7 @@
 		D36AB8833724FFE4EF0560DD /* SettingsStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SettingsStore.swift; sourceTree = "<group>"; };
 		D77976F1C229393031B4F00D /* AudioHardwareClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AudioHardwareClient.swift; sourceTree = "<group>"; };
 		E5743E6A3A79C565DD4F3729 /* KeeperEngine.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeeperEngine.swift; sourceTree = "<group>"; };
+		F70DC70346167149F5DD299E /* AppModelPinTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModelPinTests.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXGroup section */
@@ -80,6 +82,7 @@
 		5F9DCC822C5A906E9DF8C97B /* AudioIOKeeperTests */ = {
 			isa = PBXGroup;
 			children = (
+				F70DC70346167149F5DD299E /* AppModelPinTests.swift */,
 				7E69B1800C4381B4A704C235 /* AppModelTests.swift */,
 				CCE5294E2A216F8059638BA4 /* AudioHardwareWorkerTests.swift */,
 				AD0627817F15A6FBA3991096 /* KeeperEngineTests.swift */,
@@ -198,6 +201,7 @@
 			isa = PBXSourcesBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				C299D410694AAB5ACDD75C04 /* AppModelPinTests.swift in Sources */,
 				E5BC23ABC487E676C7496C80 /* AppModelTests.swift in Sources */,
 				0D9E71AC8E420EAFAC4C96DD /* AudioHardwareWorkerTests.swift in Sources */,
 				AB1E925C25DBF67BBDEC6B0D /* KeeperEngineTests.swift in Sources */,
@@ -285,7 +289,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_NS_ASSERTIONS = NO;
@@ -397,7 +401,7 @@
 				CLANG_WARN__DUPLICATE_METHOD_MATCH = YES;
 				CODE_SIGN_STYLE = Automatic;
 				COPY_PHASE_STRIP = NO;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 6;
 				DEBUG_INFORMATION_FORMAT = dwarf;
 				ENABLE_HARDENED_RUNTIME = YES;
 				ENABLE_STRICT_OBJC_MSGSEND = YES;

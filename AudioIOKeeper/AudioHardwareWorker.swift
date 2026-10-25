@@ -36,7 +36,9 @@ protocol AudioHardwareWorking: Sendable {
     /// Current hardware state, read on the worker queue.
     func snapshot() async -> HardwareSnapshot
     /// Sets the system default device, executed on the worker queue in
-    /// submission order relative to all other operations.
+    /// submission order relative to all other operations. Cancellation skips
+    /// queued writes; a write already in HAL is rolled back to its previous
+    /// default if it succeeds after cancellation and is still current.
     func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult
     /// Coalesced "something changed" pings.
     var changePings: AsyncStream<Void> { get }
@@ -102,13 +104,52 @@ final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
     }
 
     func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult {
-        await withCheckedContinuation { (continuation: CheckedContinuation<HardwareWriteResult, Never>) in
-            queue.async { [self] in
-                let succeeded = client.setDefaultDevice(uid: uid, for: direction)
-                continuation.resume(returning: HardwareWriteResult(
-                    sequence: nextSequence(), succeeded: succeeded
-                ))
+        let cancellation = WriteCancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<HardwareWriteResult, Never>) in
+                queue.async { [self] in
+                    let succeeded = writeDefaultDevice(uid: uid, for: direction, cancellation: cancellation)
+                    continuation.resume(returning: HardwareWriteResult(
+                        sequence: nextSequence(), succeeded: succeeded
+                    ))
+                }
             }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    private func writeDefaultDevice(
+        uid: String, for direction: AudioDirection, cancellation: WriteCancellation
+    ) -> Bool {
+        guard !cancellation.isCancelled else { return false }
+        let previousUID = client.defaultDeviceUID(for: direction)
+        guard !cancellation.isCancelled else { return false }
+        let succeeded = client.setDefaultDevice(uid: uid, for: direction)
+        guard cancellation.isCancelled else { return succeeded }
+        // A synchronous HAL call cannot be interrupted. Undo its late effect
+        // on this same queue before allowing another selection or snapshot.
+        if succeeded, let previousUID, client.defaultDeviceUID(for: direction) == uid {
+            client.setDefaultDevice(uid: previousUID, for: direction)
+        }
+        return false
+    }
+
+    /// Task cancellation must reach work already submitted to DispatchQueue.
+    private final class WriteCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var cancelled = false
+
+        var isCancelled: Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return cancelled
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
         }
     }
 
