@@ -175,7 +175,10 @@ final class AppModelPinTests: XCTestCase {
         XCTAssertTrue(localWorker.setDefaultCalls.isEmpty)
 
         relaunched.setKeepingEnabled(true, for: .input)
-        try await settle { relaunched.keepingEnabled(for: .input) }
+        localWorker.simulateSystemSwitch(to: "airpods", for: .input)
+        try await settle { relaunched.currentUID(for: .input) == "airpods" }
+        XCTAssertEqual(relaunched.currentUID(for: .input), "airpods",
+                       "post-enable snapshot must be applied before checking adoption")
         XCTAssertNil(relaunched.pinnedUID(for: .input), "completed adoption must not run when keeping is enabled later")
     }
 
