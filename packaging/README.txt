@@ -16,7 +16,9 @@ Install
    there is no Dock icon or main window.
 3. First launch only: this build is not notarized by Apple, so if macOS
    warns that it cannot check the app, right-click (Control-click) the app
-   in Applications, choose Open, then confirm Open. You only do this once.
+   in Applications, choose Open, then confirm Open. If your macOS version
+   does not offer that, open System Settings -> Privacy & Security and
+   click "Open Anyway" after the first blocked attempt. Once only.
 
 Using it
 --------

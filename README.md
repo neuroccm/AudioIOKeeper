@@ -56,10 +56,22 @@ itself.
 
 ## Install
 
-Download the latest build from
-[Releases](https://github.com/neuroccm/AudioIOKeeper/releases), or build it
-yourself (below). Optionally enable **Launch at login** in Settings so it is
-always on guard.
+1. Download `AudioIOKeeper-<version>.dmg` from
+   [Releases](https://github.com/neuroccm/AudioIOKeeper/releases) (or build
+   the DMG yourself, below).
+2. Open the DMG and drag **AudioIOKeeper** onto the **Applications**
+   shortcut next to it. Then eject the disk image.
+3. Launch **Audio IO Keeper** from your Applications folder. It lives in
+   the menu bar (waveform icon) — there is no Dock icon or main window.
+4. First launch only: release builds are ad-hoc signed and not notarized
+   by Apple (no paid Developer ID yet), so macOS may refuse to open it.
+   Right-click (Control-click) the app in Applications → **Open** →
+   **Open**. If your macOS version does not offer that, open
+   **System Settings → Privacy & Security** and click **Open Anyway**
+   after the first blocked attempt. You only do this once.
+
+Optionally enable **Launch at login** in Settings so it is always on guard.
+To uninstall, quit the app from its menu and delete it from Applications.
 
 > First launch: the app adopts whatever input/output macOS is already using
 > as the initial pins, so "keep what I have" works immediately — change them
@@ -67,18 +79,21 @@ always on guard.
 
 ## Build from source
 
-Requirements: Xcode 16+ and [XcodeGen](https://github.com/yonaskolb/XcodeGen)
-(`brew install xcodegen`).
+Requirements: a Mac with **Xcode 16+** (full Xcode, not just the Command
+Line Tools). If `xcodebuild -version` complains about the active developer
+directory, select Xcode once with
+`sudo xcode-select -s /Applications/Xcode.app/Contents/Developer`.
+[XcodeGen](https://github.com/yonaskolb/XcodeGen) (`brew install xcodegen`)
+is only needed if you edit `project.yml`; the generated `.xcodeproj` is
+committed and CI keeps it in sync.
+
+Build and run in Xcode:
 
 ```sh
 git clone https://github.com/neuroccm/AudioIOKeeper.git
 cd AudioIOKeeper
-xcodegen generate
-open AudioIOKeeper.xcodeproj   # or: xcodebuild build -scheme AudioIOKeeper
+open AudioIOKeeper.xcodeproj   # then Run (Cmd-R)
 ```
-
-The generated `.xcodeproj` is committed for convenience; `project.yml` is the
-source of truth — re-run `xcodegen generate` after editing it.
 
 Run the tests:
 
@@ -86,12 +101,24 @@ Run the tests:
 xcodebuild test -scheme AudioIOKeeper -destination 'platform=macOS' CODE_SIGNING_ALLOWED=NO
 ```
 
-Build a shareable disk image (ad-hoc signed, not notarized — recipients
-open it once via right-click → Open):
+### Build an installable DMG
+
+One command builds the app in Release (universal: Apple silicon + Intel)
+and packages it into a disk image containing the app, an Applications
+shortcut, a short README, and the license:
 
 ```sh
 scripts/make-dmg.sh   # writes ./AudioIOKeeper-<version>.dmg
 ```
+
+Then install exactly like a downloaded release: open the DMG, drag
+**AudioIOKeeper** onto **Applications**, eject, and launch it from
+Applications (see [Install](#install), including the first-launch note).
+
+The build is ad-hoc signed and not notarized. That is fine for your own
+Mac and for sharing with people who accept the one-time right-click →
+Open step; a notarized public build would require a paid Apple
+Developer ID, which the project does not have yet.
 
 ## Architecture
 

@@ -7,8 +7,8 @@ options:
   generateEmptyDirectories: true
 settings:
   base:
-    MARKETING_VERSION: "1.2.0"
-    CURRENT_PROJECT_VERSION: "6"
+    MARKETING_VERSION: "1.3.0"
+    CURRENT_PROJECT_VERSION: "7"
     SWIFT_VERSION: "6.0"
     SWIFT_STRICT_CONCURRENCY: complete
     CODE_SIGN_STYLE: Automatic
