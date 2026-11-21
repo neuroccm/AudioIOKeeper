@@ -33,12 +33,15 @@ final class AppModelPinTests: XCTestCase {
         worker.setSystemDefault("usb-mic", for: .input)
 
         let clock = self.clock!
-        model = AppModel(worker: worker, settings: settings, now: { clock.now() })
+        model = AppModel(
+            worker: worker, settings: settings, loginItem: FakeLoginItemManager(), now: { clock.now() }
+        )
         model.start()
         try await settle { model.pinnedUID(for: .output) == "speakers" }
     }
 
     override func tearDown() async throws {
+        model?.stop()
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
     }
 
@@ -104,9 +107,18 @@ final class AppModelPinTests: XCTestCase {
         let speakers = worker.devices.first { $0.uid == "speakers" }!
         model.togglePin(speakers, for: .output)
         XCTAssertNil(model.pinnedUID(for: .output))
+        model.stop()
+
+        let relaunchWorker = FakeAudioHardwareWorker()
+        relaunchWorker.devices = worker.devices
+        relaunchWorker.setSystemDefault("speakers", for: .output)
+        relaunchWorker.setSystemDefault("usb-mic", for: .input)
 
         let clock = self.clock!
-        let relaunched = AppModel(worker: worker, settings: settings, now: { clock.now() })
+        let relaunched = AppModel(
+            worker: relaunchWorker, settings: settings, loginItem: FakeLoginItemManager(), now: { clock.now() }
+        )
+        defer { relaunched.stop() }
         relaunched.start()
         try await settle { relaunched.currentUID(for: .output) == "speakers" }
 
@@ -132,7 +144,10 @@ final class AppModelPinTests: XCTestCase {
         // No input default on the first snapshot (unreadable/unknown default).
 
         let clock = self.clock!
-        let fresh = AppModel(worker: localWorker, settings: localSettings, now: { clock.now() })
+        let fresh = AppModel(
+            worker: localWorker, settings: localSettings, loginItem: FakeLoginItemManager(), now: { clock.now() }
+        )
+        defer { fresh.stop() }
         fresh.start()
         try await settle { fresh.pinnedUID(for: .output) == "speakers" }
         XCTAssertNil(fresh.pinnedUID(for: .input), "no default yet, nothing to adopt")
@@ -158,24 +173,29 @@ final class AppModelPinTests: XCTestCase {
         localWorker.devices = worker.devices
         localWorker.setSystemDefault("speakers", for: .output)
         // Disabled input must complete adoption even without a readable default.
-        let fresh = AppModel(worker: localWorker, settings: localSettings)
+        let fresh = AppModel(worker: localWorker, settings: localSettings, loginItem: FakeLoginItemManager())
         fresh.start()
         try await settle { fresh.pinnedUID(for: .output) == "speakers" }
+        fresh.stop()
 
         XCTAssertTrue(localSettings.didAdoptInitialPin(for: .input))
         XCTAssertNil(fresh.pinnedUID(for: .input))
         XCTAssertFalse(fresh.keepingEnabled(for: .input))
 
-        localWorker.setSystemDefault("usb-mic", for: .input)
-        let relaunched = AppModel(worker: localWorker, settings: localSettings)
+        let relaunchWorker = FakeAudioHardwareWorker()
+        relaunchWorker.devices = worker.devices
+        relaunchWorker.setSystemDefault("speakers", for: .output)
+        relaunchWorker.setSystemDefault("usb-mic", for: .input)
+        let relaunched = AppModel(worker: relaunchWorker, settings: localSettings, loginItem: FakeLoginItemManager())
+        defer { relaunched.stop() }
         relaunched.start()
         try await settle { relaunched.currentUID(for: .input) == "usb-mic" }
         XCTAssertNil(relaunched.pinnedUID(for: .input))
         XCTAssertFalse(relaunched.keepingEnabled(for: .input))
-        XCTAssertTrue(localWorker.setDefaultCalls.isEmpty)
+        XCTAssertTrue(relaunchWorker.setDefaultCalls.isEmpty)
 
         relaunched.setKeepingEnabled(true, for: .input)
-        localWorker.simulateSystemSwitch(to: "airpods", for: .input)
+        relaunchWorker.simulateSystemSwitch(to: "airpods", for: .input)
         try await settle { relaunched.currentUID(for: .input) == "airpods" }
         XCTAssertEqual(relaunched.currentUID(for: .input), "airpods",
                        "post-enable snapshot must be applied before checking adoption")
@@ -193,7 +213,8 @@ final class AppModelPinTests: XCTestCase {
     private func checkUnpinDuringSelection(at point: GatedDeviceClient.GatePoint) async throws {
         let client = GatedDeviceClient()
         let serialWorker = AudioHardwareWorker(client: client)
-        let localModel = AppModel(worker: serialWorker, settings: settings)
+        let localModel = AppModel(worker: serialWorker, settings: settings, loginItem: FakeLoginItemManager())
+        defer { localModel.stop() }
         localModel.start()
         try await settle { localModel.currentUID(for: .output) == "speakers" }
 
@@ -253,5 +274,102 @@ final class AppModelPinTests: XCTestCase {
         )
         XCTAssertEqual(worker.systemDefault(for: .output), "speakers")
         XCTAssertEqual(model.currentUID(for: .output), "speakers")
+    }
+
+    /// A transient HAL write failure (e.g. Bluetooth headset still connecting)
+    /// must schedule a retry instead of remaining permanently stuck in `.restoring`.
+    func testTransientWriteFailureRetriesAndRecovers() async throws {
+        worker.failNextWrites(1, for: .output)
+        worker.simulateSystemSwitch(to: "airpods", for: .output)
+
+        try await settle(timeout: 3) {
+            self.worker.setDefaultCalls.filter { $0.direction == .output }.count == 2
+                && self.model.status(for: .output) == .kept
+        }
+        XCTAssertEqual(worker.setDefaultCalls.filter { $0.direction == .output }.map(\.uid), ["speakers", "speakers"])
+        XCTAssertEqual(model.currentUID(for: .output), "speakers")
+        XCTAssertEqual(model.status(for: .output), .kept)
+    }
+
+    /// Unpinning while an automatic restore write is executing in HAL cancels
+    /// and rolls back the restore instead of overriding the user's unpin.
+    func testUnpinCancelsInFlightAutomaticRestore() async throws {
+        let client = GatedDeviceClient()
+        let serialWorker = AudioHardwareWorker(client: client)
+        let localModel = AppModel(worker: serialWorker, settings: settings, loginItem: FakeLoginItemManager())
+        defer { localModel.stop() }
+        localModel.start()
+        try await settle { localModel.currentUID(for: .output) == "speakers" }
+
+        // Externally switch to AirPods and hold the keeper's restore write in HAL.
+        client.setExternalDefault("airpods", for: .output)
+        client.holdNextOutputOperation(at: .write)
+        defer { client.release() }
+        localModel.rescanDevices()
+        try await settle { client.isHeld }
+        XCTAssertTrue(client.isHeld)
+
+        localModel.unpinDevice(for: .output)
+        client.release()
+
+        let snap = await serialWorker.snapshot()
+        try await settle { localModel.currentUID(for: .output) == "airpods" }
+        XCTAssertEqual(snap.defaultUID(for: .output), "airpods")
+        XCTAssertNil(localModel.pinnedUID(for: .output))
+        XCTAssertEqual(client.setDefaultCalls.filter { $0.direction == .output }.map(\.uid), ["speakers", "airpods"])
+    }
+
+    /// Pinning a device while temporarily paused resumes keeping so the newly
+    /// locked device is actually protected immediately.
+    func testPinningWhilePausedResumesKeepingAndLocksImmediately() async throws {
+        model.pauseKeeping(for: 900)
+        XCTAssertTrue(model.isPaused)
+
+        let airPods = worker.devices.first { $0.uid == "airpods" }!
+        model.togglePin(airPods, for: .output)
+        XCTAssertFalse(model.isPaused)
+        try await settle { model.currentUID(for: .output) == "airpods" }
+
+        worker.resetRecordedCalls()
+        worker.simulateSystemSwitch(to: "speakers", for: .output)
+        try await settle { worker!.setDefaultCalls.contains { $0.uid == "airpods" && $0.direction == .output } }
+        XCTAssertEqual(worker.systemDefault(for: .output), "airpods")
+    }
+
+    /// Repeated HAL notifications during an active conflict cooldown must not
+    /// spam duplicate cooldown entries into the 12-entry activity log.
+    func testCooldownDoesNotSpamActivityLog() async throws {
+        worker.competitor = [.output: "airpods"]
+        worker.simulateSystemSwitch(to: "airpods", for: .output)
+        try await settle(timeout: 2) { model.status(for: .output) == .conflicted }
+
+        for _ in 0..<5 { worker.ping() }
+        try await Task.sleep(for: .milliseconds(150))
+
+        let conflictLogs = model.activityLog.filter { $0.message.contains("keeps being switched away") }
+        XCTAssertEqual(conflictLogs.count, 1)
+    }
+
+    /// System alert/chime output follows the pinned output by default, and
+    /// can be opted out in Settings; wake-from-sleep reconciles missed drift.
+    func testLockSystemOutputAndWakeReconcile() async throws {
+        XCTAssertTrue(model.lockSystemOutput, "macOS chimes should follow pinned output by default")
+        worker.setSystemAlertOutput("airpods")
+        model.rescanDevices()
+        try await settle { model.currentSystemOutputUID == "speakers" }
+        XCTAssertEqual(worker.systemOutputCalls, ["speakers"])
+
+        // Turning the option off leaves alert output untouched.
+        model.setLockSystemOutput(false)
+        worker.setSystemAlertOutput("airpods")
+        model.rescanDevices()
+        try await settle { model.currentSystemOutputUID == "airpods" }
+        XCTAssertEqual(worker.systemOutputCalls, ["speakers"], "no alert restore while option is off")
+
+        // Simulated wake from sleep catches drift missed during sleep.
+        worker.setSystemDefault("airpods", for: .output)
+        model.handleSystemWake()
+        try await settle { model.currentUID(for: .output) == "speakers" }
+        XCTAssertEqual(worker.systemDefault(for: .output), "speakers")
     }
 }

@@ -35,8 +35,10 @@ Using it
   Keeper backs off gradually and shows the conflict in the popover rather
   than fighting it switch-for-switch.
 - Every action is shown in the popover's activity log.
-- Settings… (in the popover) has "Launch at login". About… shows version
-  and safety details. "Quit Audio IO Keeper" stops keeping immediately.
+- Settings… (in the popover) also lets you choose or unpin locked devices,
+  keep system sound effects on your locked output, temporarily unlock pins for
+  15 minutes, and toggle "Launch at login". About… shows version and safety
+  details. "Quit Audio IO Keeper" stops keeping immediately.
 
 Safety
 ------

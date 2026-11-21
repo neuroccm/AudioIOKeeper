@@ -6,6 +6,10 @@ struct MenuContentView: View {
     @Environment(AppModel.self) private var model
     @Environment(\.openSettings) private var openSettings
 
+    /// Above this combined row count, wrap the device list in an explicit-height
+    /// `ScrollView` so large studio racks scroll without collapsing `MenuBarExtra`.
+    private static let maxUnscrolledRows = 10
+
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             header
@@ -14,9 +18,8 @@ struct MenuContentView: View {
                 pausedBanner
             }
 
-            DirectionSection(direction: .output)
-            Divider()
-            DirectionSection(direction: .input)
+            devicesContainer
+
             Divider()
             activitySection
             Divider()
@@ -24,6 +27,31 @@ struct MenuContentView: View {
         }
         .padding(14)
         .frame(width: 340)
+        .onAppear {
+            model.refreshOnMenuOpen()
+        }
+    }
+
+    @ViewBuilder
+    private var devicesContainer: some View {
+        let totalRows = model.devices(for: .output).count + model.devices(for: .input).count
+        if totalRows > Self.maxUnscrolledRows {
+            ScrollView {
+                devicesStack
+            }
+            .frame(height: 360)
+        } else {
+            devicesStack
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private var devicesStack: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            DirectionSection(direction: .output)
+            Divider()
+            DirectionSection(direction: .input)
+        }
     }
 
     private var header: some View {
@@ -34,7 +62,7 @@ struct MenuContentView: View {
             VStack(alignment: .leading, spacing: 1) {
                 Text("Audio IO Keeper")
                     .font(.headline)
-                Text("Click the pin beside a device to lock it in. Blue pin = locked.")
+                Text("Click a device or its pin to lock it in. Blue pin = locked.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -58,7 +86,9 @@ struct MenuContentView: View {
             HStack(spacing: 6) {
                 Image(systemName: "lock.open.fill")
                     .foregroundStyle(.orange)
-                Text("Pins temporarily unlocked until \(until, format: .dateTime.hour().minute()) — macOS can switch freely")
+                Text(
+                    "Pins temporarily unlocked until \(until, format: .dateTime.hour().minute()) — macOS can switch"
+                )
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
@@ -92,8 +122,11 @@ struct MenuContentView: View {
 
     private var footer: some View {
         HStack {
-            Button("Settings…") { openSettings() }
-                .buttonStyle(.link)
+            Button("Settings…") {
+                NSApplication.shared.activate(ignoringOtherApps: true)
+                openSettings()
+            }
+            .buttonStyle(.link)
             Spacer()
             Button("About…") { showAboutPanel() }
                 .buttonStyle(.link)
@@ -107,8 +140,6 @@ struct MenuContentView: View {
     }
 
     /// Standard macOS About panel: app icon, name, version, and credits.
-    /// A menu-bar-only app has no app menu to host the usual About item,
-    /// so the popover footer provides it.
     private func showAboutPanel() {
         let credits = NSAttributedString(
             string: """
@@ -137,15 +168,12 @@ struct MenuContentView: View {
 }
 
 /// One direction's controls: the current status and the device list.
-/// Every device has its own pin button: blue/filled means that device is
-/// pinned (locked in as the one being used); grey/outline means it is not.
-/// Clicking a grey pin pins and uses that device; clicking the blue pin
-/// again unpins it. Right-clicking a row offers the same pin/unpin action.
 private struct DirectionSection: View {
     @Environment(AppModel.self) private var model
     let direction: AudioDirection
 
     var body: some View {
+        let items = model.devices(for: direction)
         VStack(alignment: .leading, spacing: 6) {
             HStack {
                 Label(direction.displayName, systemImage: direction.systemImage)
@@ -155,11 +183,11 @@ private struct DirectionSection: View {
 
             statusLine
 
-            ForEach(model.devices(for: direction)) { device in
+            ForEach(items) { device in
                 deviceRow(device)
             }
 
-            if model.devices(for: direction).isEmpty {
+            if items.isEmpty {
                 Text("No \(direction.displayName.lowercased()) devices found.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -175,6 +203,14 @@ private struct DirectionSection: View {
                 .foregroundStyle(statusColor(status))
             Text(statusText(status, pinnedName: pinned))
                 .foregroundStyle(.secondary)
+            Spacer(minLength: 4)
+            if status == .waitingForPinnedDevice {
+                Button("Unpin") { model.unpinDevice(for: direction) }
+                    .buttonStyle(.link)
+            } else if status == .conflicted {
+                Button("Retry") { model.retryDirection(direction) }
+                    .buttonStyle(.link)
+            }
         }
         .font(.caption)
     }
@@ -184,7 +220,7 @@ private struct DirectionSection: View {
         case .notKeeping, .noPinSelected: "Not locked — click a pin below to lock a device in"
         case .kept: "Locked to “\(pinnedName)”"
         case .restoring: "Restoring “\(pinnedName)”…"
-        case .conflicted: "Something keeps switching this — backing off and retrying periodically"
+        case .conflicted: "Something keeps switching this — backing off and retrying"
         case .waitingForPinnedDevice: "“\(pinnedName)” is disconnected — will restore on return"
         case .paused: "Temporarily unlocked — macOS may switch freely"
         }
@@ -213,11 +249,13 @@ private struct DirectionSection: View {
     }
 
     private func deviceRow(_ device: AudioDevice) -> some View {
+        let label = model.displayName(for: device, direction: direction)
         let isPinned = model.pinnedUID(for: direction) == device.uid
         let isLocked = isPinned && model.keepingEnabled(for: direction)
+        let isActivelyLocked = isLocked && !model.isPaused
+        let isPausedPin = isLocked && model.isPaused
         let isCurrent = model.currentUID(for: direction) == device.uid
         return HStack(spacing: 4) {
-            // Clicking the name uses the device now and pins it.
             Button {
                 model.selectDevice(device, for: direction)
             } label: {
@@ -225,9 +263,10 @@ private struct DirectionSection: View {
                     Image(systemName: device.transport.systemImage)
                         .frame(width: 18)
                         .foregroundStyle(.secondary)
-                    Text(device.name)
+                    Text(label)
                         .lineLimit(1)
-                        .fontWeight(isLocked ? .semibold : .regular)
+                        .foregroundStyle(.primary)
+                        .fontWeight(isActivelyLocked ? .semibold : .regular)
                     if isCurrent {
                         Image(systemName: "checkmark")
                             .font(.caption.weight(.bold))
@@ -236,50 +275,75 @@ private struct DirectionSection: View {
                     }
                     Spacer()
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .contentShape(Rectangle())
             }
-            .buttonStyle(.plain)
-            .help("Use “\(device.name)” now and pin it")
-            .accessibilityLabel("\(device.name)\(isLocked ? ", pinned and locked" : "")\(isCurrent ? ", in use" : "")")
+            .buttonStyle(.borderless)
+            .help("Use “\(label)” now and pin it")
+            .accessibilityLabel(
+                rowAccessibilityLabel(label, active: isActivelyLocked, paused: isPausedPin, current: isCurrent)
+            )
 
-            pinButton(device, isPinned: isPinned, isLocked: isLocked)
+            pinButton(
+                device, label: label, isPinned: isPinned, isActivelyLocked: isActivelyLocked, isPausedPin: isPausedPin
+            )
         }
         .padding(.vertical, 3)
         .padding(.leading, 6)
-        .background(
-            isLocked ? Color.blue.opacity(0.10) : Color.clear,
-            in: RoundedRectangle(cornerRadius: 6)
-        )
+        .background(rowBackground(active: isActivelyLocked, paused: isPausedPin), in: RoundedRectangle(cornerRadius: 6))
         .contextMenu {
+            if isPausedPin {
+                Button {
+                    model.selectDevice(device, for: direction)
+                } label: {
+                    Label("Lock “\(label)” now", systemImage: "pin.fill")
+                }
+            }
             Button {
-                model.togglePin(device, for: direction)
+                if isLocked { model.unpinDevice(for: direction) } else { model.selectDevice(device, for: direction) }
             } label: {
                 Label(
-                    isLocked ? "Unpin “\(device.name)” (unlock)" : "Pin & lock “\(device.name)”",
+                    isLocked ? "Unpin “\(label)” (unlock)" : "Pin & lock “\(label)”",
                     systemImage: isLocked ? "pin" : "pin.fill"
                 )
             }
         }
     }
 
-    /// The lock itself: blue and filled when this device is pinned, grey
-    /// and outlined when it is not. Always visible so locking never
-    /// depends on discovering a row click.
-    private func pinButton(_ device: AudioDevice, isPinned: Bool, isLocked: Bool) -> some View {
-        Button {
+    private func rowBackground(active: Bool, paused: Bool) -> Color {
+        if active { return Color.blue.opacity(0.10) }
+        if paused { return Color.orange.opacity(0.08) }
+        return Color.clear
+    }
+
+    private func rowAccessibilityLabel(_ label: String, active: Bool, paused: Bool, current: Bool) -> String {
+        let pinState = active ? ", pinned and locked" : (paused ? ", pinned, temporarily unlocked" : "")
+        return "\(label)\(pinState)\(current ? ", in use" : "")"
+    }
+
+    private func pinButton(
+        _ device: AudioDevice, label: String, isPinned: Bool, isActivelyLocked: Bool, isPausedPin: Bool
+    ) -> some View {
+        let pinColor: Color = isActivelyLocked ? .blue : (isPausedPin ? .orange : .secondary)
+        let helpText: String = if isActivelyLocked {
+            "“\(label)” is pinned (locked in). Click to unpin."
+        } else if isPausedPin {
+            "“\(label)” is pinned but temporarily unlocked. Click to lock now."
+        } else {
+            "Pin & lock “\(label)” so it stays the \(direction.displayName.lowercased()) in use"
+        }
+        return Button {
             model.togglePin(device, for: direction)
         } label: {
             Image(systemName: isPinned ? "pin.fill" : "pin")
                 .font(.body)
-                .foregroundStyle(isLocked ? Color.blue : Color.secondary)
+                .foregroundStyle(pinColor)
                 .frame(width: 30, height: 24)
                 .contentShape(Rectangle())
         }
-        .buttonStyle(.plain)
-        .help(isLocked
-            ? "“\(device.name)” is pinned (locked in). Click to unpin."
-            : "Pin & lock “\(device.name)” so it stays the \(direction.displayName.lowercased()) in use")
-        .accessibilityLabel(isLocked ? "Unpin \(device.name)" : "Pin and lock \(device.name)")
-        .accessibilityValue(isLocked ? "Pinned" : "Not pinned")
+        .buttonStyle(.borderless)
+        .help(helpText)
+        .accessibilityLabel(isActivelyLocked ? "Unpin \(label)" : "Pin and lock \(label)")
+        .accessibilityValue(isActivelyLocked ? "Pinned" : (isPausedPin ? "Paused" : "Not pinned"))
     }
 }

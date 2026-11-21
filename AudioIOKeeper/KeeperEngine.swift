@@ -52,10 +52,9 @@ enum KeeperEngine {
 /// so the keeper still retries at a controlled rate. The cooldown exponent
 /// is an escalation level tracked separately from the rolling budget: it
 /// only grows while a conflict is unresolved and never decays just because
-/// old attempts fell out of the window (deriving it from the in-window
-/// count made long conflicts collapse back to short cooldowns and never
-/// reach the cap). A sustained quiet period with the pin in place, or a
-/// deliberate user change, resets everything. Pure value type with an
+/// old attempts fell out of the window. Continuous stability (`stableSince`)
+/// lasting `quietReset` seconds — even with no intervening HAL events — or a
+/// deliberate user change resets everything. Pure value type with an
 /// injected clock so the whole policy is unit-testable.
 struct RestoreThrottle: Equatable, Sendable {
 
@@ -76,6 +75,8 @@ struct RestoreThrottle: Equatable, Sendable {
     static let maxCooldown: TimeInterval = 60
     /// Pin continuously in place this long clears the history, in seconds.
     static let quietReset: TimeInterval = 60
+    /// Delay before retrying a transient HAL write failure within budget.
+    static let failureRetryDelay: TimeInterval = 1
 
     /// Highest escalation that still changes the duration:
     /// `baseCooldown * 2^5` already exceeds `maxCooldown`.
@@ -87,11 +88,18 @@ struct RestoreThrottle: Equatable, Sendable {
     /// independent of the rolling window so backoff is monotonic for the
     /// whole episode and reaches (then holds) the cap.
     private(set) var escalationLevel = 0
+    /// Earliest timestamp since the last drift at which the pin was observed
+    /// in place. Proves continuous stability across quiet periods without
+    /// requiring periodic polling events.
+    private(set) var stableSince: Date?
 
     /// True while repeated drift indicates something is actively fighting
     /// the keeper over this direction.
     func isConflicting(now: Date) -> Bool {
-        escalationLevel > 0 || recentCount(now: now) >= Self.immediateBudget
+        if let stableSince, now.timeIntervalSince(stableSince) >= Self.quietReset {
+            return false
+        }
+        return escalationLevel > 0 || recentCount(now: now) >= Self.immediateBudget
     }
 
     /// Asks whether a restore may happen at `now`. Calling this when the
@@ -99,6 +107,11 @@ struct RestoreThrottle: Equatable, Sendable {
     /// next cooldown; record every restore actually performed via
     /// `recordRestore(at:)`.
     mutating func decision(now: Date) -> Decision {
+        if let stableSince, now.timeIntervalSince(stableSince) >= Self.quietReset {
+            reset()
+        }
+        // A drift just occurred, so any prior stable streak has ended.
+        stableSince = nil
         prune(now: now)
         if let cooldownUntil {
             if now < cooldownUntil {
@@ -124,20 +137,19 @@ struct RestoreThrottle: Equatable, Sendable {
     }
 
     mutating func recordRestore(at now: Date) {
+        stableSince = nil
         prune(now: now)
         restoreTimes.append(now)
     }
 
     /// Called when the pinned device is observed as the current default.
-    /// After a full quiet period with no restores, history is forgotten so
-    /// an old conflict does not penalize a future one-off switch.
+    /// Records the start of a continuous stable streak; once the streak
+    /// reaches `quietReset`, conflict history is forgotten. A brief blip
+    /// during an active conflict does not wipe escalation.
     mutating func recordStableObservation(at now: Date) {
-        guard let last = restoreTimes.last else {
-            cooldownUntil = nil
-            escalationLevel = 0
-            return
-        }
-        if now.timeIntervalSince(last) >= Self.quietReset {
+        let since = stableSince ?? now
+        stableSince = since
+        if now.timeIntervalSince(since) >= Self.quietReset {
             restoreTimes.removeAll()
             cooldownUntil = nil
             escalationLevel = 0
@@ -150,6 +162,7 @@ struct RestoreThrottle: Equatable, Sendable {
         restoreTimes.removeAll()
         cooldownUntil = nil
         escalationLevel = 0
+        stableSince = nil
     }
 
     private func recentCount(now: Date) -> Int {

@@ -26,6 +26,7 @@ final class GatedDeviceClient: AudioHardwareClient, @unchecked Sendable {
     var setDefaultCalls: [(uid: String, direction: AudioDirection)] { locked { writes } }
 
     func holdNextOutputOperation(at point: GatePoint) { locked { nextGate = point } }
+    func setExternalDefault(_ uid: String, for direction: AudioDirection) { locked { defaults[direction] = uid } }
     func release() { gate.signal() }
     func allDevices() -> [AudioDevice] { devices }
     func addChangeListener(_ handler: @escaping @Sendable () -> Void) {}
@@ -98,6 +99,11 @@ final class GatedListenerClient: AudioHardwareClient, @unchecked Sendable {
 
     func releaseInstall() { gate.signal() }
 
+    func emitChange() {
+        let callback = locked { handler }
+        callback?()
+    }
+
     private func locked<T>(_ body: () -> T) -> T {
         lock.lock()
         defer { lock.unlock() }
@@ -137,6 +143,95 @@ final class AudioHardwareWorkerTests: XCTestCase {
         XCTAssertEqual(client.installCount, 1)
     }
 
+    func testCancelledQueuedWriteSkipsWithoutBumpingSequence() async throws {
+        let client = GatedDeviceClient()
+        let worker = AudioHardwareWorker(client: client)
+        let before = await worker.snapshot()
+
+        // Hold the serial worker queue on an earlier read so the queued write
+        // is deterministically cancelled before it reaches HAL.
+        client.holdNextOutputOperation(at: .read)
+        defer { client.release() }
+        let blockingSnapshot = Task { await worker.snapshot() }
+        let held = await poll(timeout: 2) { client.isHeld }
+        XCTAssertTrue(held)
+
+        let writeTask = Task { await worker.setDefaultDevice(uid: "airpods", for: .output) }
+        try await Task.sleep(for: .milliseconds(30))
+        writeTask.cancel()
+        client.release()
+
+        let blockingResult = await blockingSnapshot.value
+        let result = await writeTask.value
+
+        XCTAssertTrue(result.wasSkipped, "write cancelled while queued must be skipped")
+        XCTAssertEqual(result.sequence, 0, "skipped writes must not advance the sequence number")
+        XCTAssertFalse(result.succeeded)
+        XCTAssertTrue(client.setDefaultCalls.isEmpty)
+        let after = await worker.snapshot()
+        XCTAssertEqual(blockingResult.sequence, before.sequence + 1)
+        XCTAssertEqual(after.sequence, blockingResult.sequence + 1)
+    }
+
+    func testRollbackSkippedWhenPreviousMatchesTarget() async throws {
+        let client = GatedDeviceClient()
+        let worker = AudioHardwareWorker(client: client)
+        // Target is already the current default ("speakers").
+        client.holdNextOutputOperation(at: .write)
+        defer { client.release() }
+
+        let task = Task { await worker.setDefaultDevice(uid: "speakers", for: .output) }
+        let held = await poll(timeout: 2) { client.isHeld }
+        XCTAssertTrue(held)
+
+        task.cancel()
+        client.release()
+        let result = await task.value
+
+        XCTAssertFalse(result.succeeded)
+        XCTAssertEqual(
+            client.setDefaultCalls.filter { $0.direction == .output }.map(\.uid),
+            ["speakers"],
+            "rollback must not issue a redundant second write when previousUID == uid"
+        )
+    }
+
+    func testHardwareChangeBurstCoalescesIntoSinglePing() async throws {
+        let client = GatedListenerClient()
+        client.releaseInstall()
+        let worker = AudioHardwareWorker(client: client)
+        worker.start()
+        _ = await worker.snapshot()
+
+        let pingCount = LockedCounter()
+        let consumer = Task {
+            for await _ in worker.changePings {
+                pingCount.increment()
+            }
+        }
+        defer { consumer.cancel() }
+
+        for _ in 0..<20 { client.emitChange() }
+        try await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(pingCount.value, 1, "a burst of HAL notifications must coalesce into one ping")
+    }
+
+    /// Read-only smoke test against the live Core Audio HAL verifying safe
+    /// CFString bridging, TranslateUIDToDevice round-trip, and unknown UIDs.
+    func testCoreAudioClientReadOnlySmokeTest() {
+        let client = CoreAudioHardwareClient()
+        let devices = client.allDevices()
+        for device in devices {
+            XCTAssertFalse(device.uid.isEmpty)
+            XCTAssertFalse(device.name.isEmpty)
+            XCTAssertEqual(client.deviceID(forUID: device.uid), device.objectID)
+        }
+        XCTAssertNil(client.deviceID(forUID: "com.neuroccm.nonexistent-device-\(UUID().uuidString)"))
+        _ = client.defaultDeviceUID(for: .output)
+        _ = client.defaultDeviceUID(for: .input)
+        _ = client.defaultSystemOutputUID()
+    }
+
     private func poll(timeout: TimeInterval, _ condition: () -> Bool) async -> Bool {
         let deadline = Date().addingTimeInterval(timeout)
         while Date() < deadline {
@@ -144,5 +239,22 @@ final class AudioHardwareWorkerTests: XCTestCase {
             try? await Task.sleep(for: .milliseconds(10))
         }
         return condition()
+    }
+}
+
+private final class LockedCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var count = 0
+
+    var value: Int {
+        lock.lock()
+        defer { lock.unlock() }
+        return count
+    }
+
+    func increment() {
+        lock.lock()
+        count += 1
+        lock.unlock()
     }
 }

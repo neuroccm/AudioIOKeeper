@@ -133,10 +133,77 @@ final class RestoreThrottleTests: XCTestCase {
             throttle.recordRestore(at: t0)
         }
         _ = throttle.decision(now: t0)
+        // Pin returns and holds continuously for a full quietReset window.
+        throttle.recordStableObservation(at: t0.addingTimeInterval(0.05))
         let later = t0.addingTimeInterval(RestoreThrottle.quietReset + 1)
         throttle.recordStableObservation(at: later)
         XCTAssertFalse(throttle.isConflicting(now: later))
         XCTAssertEqual(throttle.decision(now: later), .allow)
+    }
+
+    /// After a conflict resolves and stays stable with zero HAL events for hours,
+    /// the next one-off drift must restore immediately rather than imposing a stale
+    /// 32-60 s cooldown from the old episode.
+    func testLongQuietPeriodWithoutIntermediateEventsResetsEscalationOnNextDrift() {
+        var throttle = RestoreThrottle()
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: t0)
+        }
+        _ = throttle.decision(now: t0) // escalationLevel = 1 (2 s)
+        let retry1 = t0.addingTimeInterval(3)
+        XCTAssertEqual(throttle.decision(now: retry1), .allow)
+        throttle.recordRestore(at: retry1)
+        _ = throttle.decision(now: retry1) // escalationLevel = 2 (4 s)
+
+        // Conflict stops; one self-notification confirms pin held, then 5 quiet hours pass.
+        throttle.recordStableObservation(at: retry1.addingTimeInterval(0.05))
+        let fiveHoursLater = retry1.addingTimeInterval(5 * 3_600)
+        XCTAssertFalse(throttle.isConflicting(now: fiveHoursLater))
+        XCTAssertEqual(throttle.decision(now: fiveHoursLater), .allow)
+        XCTAssertEqual(throttle.escalationLevel, 0)
+    }
+
+    /// During a long conflict whose old attempts have pruned out of the 60 s window,
+    /// a brief 0.1 s stable blip must NOT wipe escalation.
+    func testBriefStableBlipDuringLongConflictDoesNotWipeEscalation() {
+        var throttle = RestoreThrottle()
+        var now = t0
+        for _ in 0..<RestoreThrottle.immediateBudget {
+            throttle.recordRestore(at: now)
+        }
+        // Escalate past the 60 s rolling window so restoreTimes prunes empty.
+        for _ in 0..<7 {
+            switch throttle.decision(now: now) {
+            case .allow:
+                throttle.recordRestore(at: now)
+                now = now.addingTimeInterval(0.05)
+            case .cooldown(let until):
+                now = until
+            }
+        }
+        let levelBeforeBlip = throttle.escalationLevel
+        XCTAssertGreaterThan(levelBeforeBlip, 0)
+
+        // Pin holds for only 0.1 s after old attempts have aged out of the window.
+        let afterWindow = now.addingTimeInterval(RestoreThrottle.window + 5)
+        throttle.recordStableObservation(at: afterWindow)
+        XCTAssertEqual(
+            throttle.escalationLevel, levelBeforeBlip,
+            "a brief stable observation must not wipe escalation"
+        )
+
+        // Cooldown expired so one retry is allowed, then the next drift immediately
+        // re-arms an escalated cooldown (not a fresh immediate budget).
+        let retryTime = afterWindow.addingTimeInterval(0.1)
+        XCTAssertEqual(throttle.decision(now: retryTime), .allow)
+        throttle.recordRestore(at: retryTime)
+        let nextDrift = retryTime.addingTimeInterval(0.05)
+        if case .cooldown(let until) = throttle.decision(now: nextDrift) {
+            XCTAssertGreaterThan(throttle.escalationLevel, levelBeforeBlip)
+            XCTAssertGreaterThan(until.timeIntervalSince(nextDrift), RestoreThrottle.baseCooldown)
+        } else {
+            XCTFail("a 0.1 s blip must not reset sustained conflict escalation")
+        }
     }
 
     func testResetClearsConflict() {
@@ -203,6 +270,7 @@ final class RestoreThrottleTests: XCTestCase {
             "second cooldown in the same episode doubles"
         )
 
+        throttle.recordStableObservation(at: firstRetry.addingTimeInterval(0.05))
         let later = firstRetry.addingTimeInterval(RestoreThrottle.quietReset + 1)
         throttle.recordStableObservation(at: later)
         XCTAssertEqual(throttle.escalationLevel, 0)

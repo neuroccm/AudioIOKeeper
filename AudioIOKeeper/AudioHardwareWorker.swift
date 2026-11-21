@@ -9,6 +9,20 @@ struct HardwareSnapshot: Sendable {
     let devices: [AudioDevice]
     /// Current default device UID per direction (value may be nil).
     let defaults: [AudioDirection: String?]
+    /// Current system alert/sound-effects output device UID, if readable.
+    let defaultSystemOutputUID: String?
+
+    init(
+        sequence: UInt64,
+        devices: [AudioDevice],
+        defaults: [AudioDirection: String?],
+        defaultSystemOutputUID: String? = nil
+    ) {
+        self.sequence = sequence
+        self.devices = devices
+        self.defaults = defaults
+        self.defaultSystemOutputUID = defaultSystemOutputUID
+    }
 
     func defaultUID(for direction: AudioDirection) -> String? {
         defaults[direction] ?? nil
@@ -19,6 +33,34 @@ struct HardwareSnapshot: Sendable {
 struct HardwareWriteResult: Sendable {
     let sequence: UInt64
     let succeeded: Bool
+    /// True when the write was cancelled before touching Core Audio HAL.
+    let wasSkipped: Bool
+
+    init(sequence: UInt64, succeeded: Bool, wasSkipped: Bool = false) {
+        self.sequence = sequence
+        self.succeeded = succeeded
+        self.wasSkipped = wasSkipped
+    }
+}
+
+/// Thread-safe cancel hook so `@MainActor` tasks cancel cleanly from `nonisolated deinit`.
+final class CancellationBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancelAll: (() -> Void)?
+
+    func set(_ handler: @escaping () -> Void) {
+        lock.lock()
+        cancelAll = handler
+        lock.unlock()
+    }
+
+    func cancel() {
+        lock.lock()
+        let handler = cancelAll
+        cancelAll = nil
+        lock.unlock()
+        handler?()
+    }
 }
 
 /// Async façade over the synchronous Core Audio client.
@@ -37,11 +79,25 @@ protocol AudioHardwareWorking: Sendable {
     func snapshot() async -> HardwareSnapshot
     /// Sets the system default device, executed on the worker queue in
     /// submission order relative to all other operations. Cancellation skips
-    /// queued writes; a write already in HAL is rolled back to its previous
-    /// default if it succeeds after cancellation and is still current.
-    func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult
+    /// queued writes; when `rollbackOnCancel` is true, a write already in HAL
+    /// is rolled back to its previous default if it succeeds after cancellation.
+    func setDefaultDevice(
+        uid: String, for direction: AudioDirection, rollbackOnCancel: Bool
+    ) async -> HardwareWriteResult
+    /// Sets the system alert/sound-effects output device on the worker queue.
+    func setDefaultSystemOutputDevice(uid: String) async -> HardwareWriteResult
     /// Coalesced "something changed" pings.
     var changePings: AsyncStream<Void> { get }
+}
+
+extension AudioHardwareWorking {
+    func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult {
+        await setDefaultDevice(uid: uid, for: direction, rollbackOnCancel: true)
+    }
+
+    func setDefaultSystemOutputDevice(uid: String) async -> HardwareWriteResult {
+        HardwareWriteResult(sequence: 0, succeeded: false, wasSkipped: true)
+    }
 }
 
 final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
@@ -68,18 +124,18 @@ final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
         self.pingContinuation = continuation
     }
 
+    deinit {
+        pingContinuation.finish()
+    }
+
     func start() {
         lock.lock()
         let shouldInstall = !started
         started = true
         lock.unlock()
         guard shouldInstall else { return }
-        // Listener registration is itself a synchronous HAL call
-        // (AudioObjectAddPropertyListenerBlock x3): it runs on the worker
-        // queue, ahead of the first snapshot enqueued after start(), so a
-        // HAL stall during registration delays hardware work only — never
-        // launch or the main event loop. The install-once guard above and
-        // the client's own guard both still apply.
+        // Listener registration is itself a synchronous HAL call: run it on
+        // the worker queue ahead of the first snapshot so launch never stalls.
         queue.async { [weak self] in
             guard let self else { return }
             client.addChangeListener { [weak self] in
@@ -91,24 +147,56 @@ final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
     func snapshot() async -> HardwareSnapshot {
         await withCheckedContinuation { (continuation: CheckedContinuation<HardwareSnapshot, Never>) in
             queue.async { [self] in
+                client.ensureListenersInstalled()
                 let devices = client.allDevices()
                 var defaults: [AudioDirection: String?] = [:]
                 for direction in AudioDirection.allCases {
                     defaults[direction] = client.defaultDeviceUID(for: direction)
                 }
+                let systemOutputUID = client.defaultSystemOutputUID()
                 continuation.resume(returning: HardwareSnapshot(
-                    sequence: nextSequence(), devices: devices, defaults: defaults
+                    sequence: nextSequence(),
+                    devices: devices,
+                    defaults: defaults,
+                    defaultSystemOutputUID: systemOutputUID
                 ))
             }
         }
     }
 
-    func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult {
+    func setDefaultDevice(
+        uid: String, for direction: AudioDirection, rollbackOnCancel: Bool
+    ) async -> HardwareWriteResult {
         let cancellation = WriteCancellation()
         return await withTaskCancellationHandler {
             await withCheckedContinuation { (continuation: CheckedContinuation<HardwareWriteResult, Never>) in
                 queue.async { [self] in
-                    let succeeded = writeDefaultDevice(uid: uid, for: direction, cancellation: cancellation)
+                    let result = writeDefaultDevice(
+                        uid: uid,
+                        for: direction,
+                        rollbackOnCancel: rollbackOnCancel,
+                        cancellation: cancellation
+                    )
+                    continuation.resume(returning: result)
+                }
+            }
+        } onCancel: {
+            cancellation.cancel()
+        }
+    }
+
+    func setDefaultSystemOutputDevice(uid: String) async -> HardwareWriteResult {
+        let cancellation = WriteCancellation()
+        return await withTaskCancellationHandler {
+            await withCheckedContinuation { (continuation: CheckedContinuation<HardwareWriteResult, Never>) in
+                queue.async { [self] in
+                    guard !cancellation.isCancelled else {
+                        continuation.resume(returning: HardwareWriteResult(
+                            sequence: 0, succeeded: false, wasSkipped: true
+                        ))
+                        return
+                    }
+                    let succeeded = client.setDefaultSystemOutputDevice(uid: uid)
                     continuation.resume(returning: HardwareWriteResult(
                         sequence: nextSequence(), succeeded: succeeded
                     ))
@@ -120,19 +208,33 @@ final class AudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
     }
 
     private func writeDefaultDevice(
-        uid: String, for direction: AudioDirection, cancellation: WriteCancellation
-    ) -> Bool {
-        guard !cancellation.isCancelled else { return false }
-        let previousUID = client.defaultDeviceUID(for: direction)
-        guard !cancellation.isCancelled else { return false }
+        uid: String,
+        for direction: AudioDirection,
+        rollbackOnCancel: Bool,
+        cancellation: WriteCancellation
+    ) -> HardwareWriteResult {
+        guard !cancellation.isCancelled else {
+            return HardwareWriteResult(sequence: 0, succeeded: false, wasSkipped: true)
+        }
+        let previousUID = rollbackOnCancel ? client.defaultDeviceUID(for: direction) : nil
+        guard !cancellation.isCancelled else {
+            return HardwareWriteResult(sequence: 0, succeeded: false, wasSkipped: true)
+        }
         let succeeded = client.setDefaultDevice(uid: uid, for: direction)
-        guard cancellation.isCancelled else { return succeeded }
-        // A synchronous HAL call cannot be interrupted. Undo its late effect
-        // on this same queue before allowing another selection or snapshot.
-        if succeeded, let previousUID, client.defaultDeviceUID(for: direction) == uid {
+        guard cancellation.isCancelled else {
+            return HardwareWriteResult(sequence: nextSequence(), succeeded: succeeded)
+        }
+        // A synchronous HAL call cannot be interrupted. When rollback is
+        // requested (e.g. unpin), undo its late effect on this same queue
+        // before allowing another selection or snapshot.
+        if rollbackOnCancel,
+           succeeded,
+           let previousUID,
+           previousUID != uid,
+           client.defaultDeviceUID(for: direction) == uid {
             client.setDefaultDevice(uid: previousUID, for: direction)
         }
-        return false
+        return HardwareWriteResult(sequence: nextSequence(), succeeded: false)
     }
 
     /// Task cancellation must reach work already submitted to DispatchQueue.

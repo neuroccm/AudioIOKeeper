@@ -1,0 +1,544 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Audio IO Keeper — Keep your macOS audio devices where you put them</title>
+  <meta name="description" content="A tiny native macOS menu-bar app that pins your chosen audio input and output devices and restores them whenever macOS switches defaults on its own.">
+  <link rel="icon" type="image/png" href="icon.png">
+  <style>
+    :root {
+      --bg: #ffffff;
+      --bg-alt: #f5f5f7;
+      --card: #ffffff;
+      --text: #1d1d1f;
+      --muted: #5e5e66;
+      --border: #e5e5ea;
+      --accent: #0071e3;
+      --accent-hover: #005bb5;
+      --accent-soft: rgba(0, 113, 227, 0.1);
+      --ok: #1d8a4e;
+      --shadow: 0 10px 30px rgba(0, 0, 0, 0.06);
+    }
+
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0f1014;
+        --bg-alt: #181a20;
+        --card: #1c1f26;
+        --text: #f5f5f7;
+        --muted: #a1a1aa;
+        --border: #2c2f38;
+        --accent: #2997ff;
+        --accent-hover: #52acff;
+        --accent-soft: rgba(41, 151, 255, 0.14);
+        --ok: #34d399;
+        --shadow: 0 12px 34px rgba(0, 0, 0, 0.35);
+      }
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "SF Pro Display", "Helvetica Neue", Helvetica, Arial, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      line-height: 1.6;
+      -webkit-font-smoothing: antialiased;
+    }
+
+    a { color: var(--accent); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+
+    .container {
+      max-width: 980px;
+      margin: 0 auto;
+      padding: 0 24px;
+    }
+
+    header.nav {
+      position: sticky;
+      top: 0;
+      z-index: 10;
+      backdrop-filter: saturate(180%) blur(16px);
+      -webkit-backdrop-filter: saturate(180%) blur(16px);
+      background: color-mix(in srgb, var(--bg) 82%, transparent);
+      border-bottom: 1px solid var(--border);
+    }
+
+    .nav-inner {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      height: 60px;
+      gap: 16px;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-weight: 600;
+      color: var(--text);
+      text-decoration: none;
+    }
+
+    .brand:hover { text-decoration: none; }
+
+    .brand img {
+      width: 28px;
+      height: 28px;
+      border-radius: 7px;
+    }
+
+    .nav-links {
+      display: flex;
+      align-items: center;
+      gap: 20px;
+      font-size: 14px;
+    }
+
+    .nav-links a { color: var(--muted); }
+    .nav-links a:hover { color: var(--text); text-decoration: none; }
+
+    .hero {
+      padding: 72px 0 56px;
+      text-align: center;
+    }
+
+    .hero-icon {
+      width: 96px;
+      height: 96px;
+      border-radius: 22px;
+      box-shadow: var(--shadow);
+      margin-bottom: 24px;
+    }
+
+    .badge-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 20px;
+    }
+
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 12.5px;
+      font-weight: 500;
+      background: var(--accent-soft);
+      color: var(--accent);
+    }
+
+    .badge.neutral {
+      background: var(--bg-alt);
+      color: var(--muted);
+      border: 1px solid var(--border);
+    }
+
+    h1 {
+      margin: 0 auto 16px;
+      max-width: 720px;
+      font-size: clamp(32px, 5vw, 48px);
+      line-height: 1.12;
+      letter-spacing: -0.025em;
+    }
+
+    .subtitle {
+      margin: 0 auto 32px;
+      max-width: 640px;
+      font-size: 18px;
+      color: var(--muted);
+    }
+
+    .cta-row {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 12px 22px;
+      border-radius: 12px;
+      font-size: 15px;
+      font-weight: 600;
+      transition: transform 0.12s ease, background 0.15s ease;
+    }
+
+    .btn:hover { text-decoration: none; transform: translateY(-1px); }
+
+    .btn-primary {
+      background: var(--accent);
+      color: #ffffff;
+    }
+
+    .btn-primary:hover { background: var(--accent-hover); }
+
+    .btn-secondary {
+      background: var(--bg-alt);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    section {
+      padding: 56px 0;
+      border-top: 1px solid var(--border);
+    }
+
+    section.alt { background: var(--bg-alt); }
+
+    h2 {
+      margin: 0 0 12px;
+      font-size: 28px;
+      letter-spacing: -0.02em;
+    }
+
+    .section-lead {
+      margin: 0 0 32px;
+      max-width: 680px;
+      color: var(--muted);
+      font-size: 16px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+      gap: 18px;
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 22px;
+      box-shadow: var(--shadow);
+    }
+
+    .card h3 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      letter-spacing: -0.01em;
+    }
+
+    .card p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 14.5px;
+    }
+
+    .release-box {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 26px;
+      box-shadow: var(--shadow);
+    }
+
+    .release-box ul {
+      margin: 12px 0 0;
+      padding-left: 20px;
+      color: var(--muted);
+    }
+
+    .release-box li { margin-bottom: 8px; }
+    .release-box strong { color: var(--text); }
+
+    .steps {
+      counter-reset: step;
+      display: grid;
+      gap: 14px;
+      padding: 0;
+      margin: 0;
+      list-style: none;
+    }
+
+    .steps li {
+      position: relative;
+      padding: 18px 20px 18px 56px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 14px;
+      font-size: 15px;
+    }
+
+    .steps li::before {
+      counter-increment: step;
+      content: counter(step);
+      position: absolute;
+      left: 18px;
+      top: 18px;
+      width: 26px;
+      height: 26px;
+      border-radius: 50%;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 700;
+      font-size: 13px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .pill-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 18px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 13px;
+      border-radius: 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      font-size: 13.5px;
+      font-weight: 500;
+    }
+
+    .pill .dot {
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+    }
+
+    code {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      font-size: 0.9em;
+      padding: 2px 6px;
+      border-radius: 6px;
+      background: var(--bg-alt);
+      border: 1px solid var(--border);
+    }
+
+    footer {
+      border-top: 1px solid var(--border);
+      padding: 32px 0;
+      font-size: 14px;
+      color: var(--muted);
+    }
+
+    .footer-inner {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      gap: 12px;
+    }
+
+    @media (max-width: 640px) {
+      .nav-links { display: none; }
+      .hero { padding: 48px 0 40px; }
+    }
+  </style>
+</head>
+<body>
+  <header class="nav">
+    <div class="container nav-inner">
+      <a class="brand" href="#">
+        <img src="icon.png" alt="Audio IO Keeper icon">
+        <span>Audio IO Keeper</span>
+      </a>
+      <nav class="nav-links" aria-label="Primary">
+        <a href="#features">Features</a>
+        <a href="#whats-new">v1.3.1</a>
+        <a href="#safety">Safety</a>
+        <a href="#install">Install</a>
+        <a href="https://github.com/neuroccm/AudioIOKeeper">GitHub</a>
+      </nav>
+    </div>
+  </header>
+
+  <main>
+    <section class="hero" style="border-top: none;">
+      <div class="container">
+        <img class="hero-icon" src="icon.png" alt="Audio IO Keeper app icon">
+        <div class="badge-row">
+          <span class="badge">v1.3.1</span>
+          <span class="badge neutral">macOS 14 Sonoma+</span>
+          <span class="badge neutral">Universal (Apple Silicon &amp; Intel)</span>
+          <span class="badge neutral">Open Source · MIT</span>
+        </div>
+        <h1>Keep your macOS audio devices where you put them.</h1>
+        <p class="subtitle">
+          Take out an AirPod, walk near your iPhone, or plug in a monitor — and macOS silently
+          switches your mic or speakers mid-call. Audio IO Keeper pins your chosen input and output
+          and moves them straight back the moment macOS drifts.
+        </p>
+        <div class="cta-row">
+          <a class="btn btn-primary" href="https://github.com/neuroccm/AudioIOKeeper/releases/latest">
+            Download v1.3.1 (.dmg)
+          </a>
+          <a class="btn btn-secondary" href="https://github.com/neuroccm/AudioIOKeeper">
+            View Source on GitHub
+          </a>
+        </div>
+      </div>
+    </section>
+
+    <section id="features" class="alt">
+      <div class="container">
+        <h2>How it works</h2>
+        <p class="section-lead">
+          Audio IO Keeper lives quietly in your menu bar with no Dock icon or background clutter.
+          Every action it takes is visible in its popover activity log.
+        </p>
+        <div class="grid">
+          <article class="card">
+            <h3>One-click device pinning</h3>
+            <p>
+              Click any output or input device (or its pin) in the menu-bar popover to switch to it
+              immediately and lock it in blue. Click the blue pin again to unlock.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Settings lock pickers &amp; alert sounds</h3>
+            <p>
+              Choose or unpin locked devices directly in <strong>Settings → Locked devices</strong>,
+              and optionally lock macOS system sound effects to your pinned output.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Smart duplicate labels</h3>
+            <p>
+              Dual monitors or HDMI + DisplayPort endpoints with identical names are automatically
+              disambiguated by connection type (and a short UID tag when needed).
+            </p>
+          </article>
+          <article class="card">
+            <h3>Graceful disconnects &amp; wake</h3>
+            <p>
+              If a pinned device unplugs, macOS uses its fallback without errors and your pin is
+              restored as soon as the device returns — including slow-waking docks and displays.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Anti-thrash conflict backoff</h3>
+            <p>
+              If another app or automation repeatedly overrides a default, the keeper backs off with
+              growing cooldowns (2 s to 60 s) and surfaces the conflict instead of fighting.
+            </p>
+          </article>
+          <article class="card">
+            <h3>15-minute temporary unlock</h3>
+            <p>
+              Need AirPods for a single call? Unlock pins for 15 minutes from Settings — your pins
+              stay remembered, survive relaunch, and lock back automatically when time is up.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section id="whats-new">
+      <div class="container">
+        <h2>What’s new in v1.3.1</h2>
+        <p class="section-lead">
+          Focused reliability, responsiveness, and multi-display polish across macOS 14+.
+        </p>
+        <div class="release-box">
+          <ul>
+            <li>
+              <strong>Reliable menu-bar device list &amp; clicks:</strong> Fixed a popover layout
+              collapse when devices populate asynchronously and switched device/pin controls to
+              native AppKit-backed borderless buttons for immediate first-click selection.
+            </li>
+            <li>
+              <strong>Per-device Core Audio hot-plug listeners:</strong> Tracks stream, liveness,
+              name, and source transitions per device — catching slow-waking DisplayPort/HDMI
+              monitors, docks, and Bluetooth headsets automatically (plus <code>coreaudiod</code> restarts).
+            </li>
+            <li>
+              <strong>Duplicate device disambiguation:</strong> Automatically labels colliding
+              device names with their port (e.g. HDMI vs DisplayPort).
+            </li>
+            <li>
+              <strong>Interactive Settings &amp; alert-sound locking:</strong> Pick or unpin Output
+              and Input directly in Settings, and optionally lock system alert sounds to your pinned output.
+            </li>
+            <li>
+              <strong>Post-wake follow-up &amp; Universal DMG:</strong> Reconciles immediately on
+              wake plus a 1.5 s follow-up scan, packaged as a Universal (<code>arm64</code> +
+              <code>x86_64</code>) Release disk image.
+            </li>
+          </ul>
+        </div>
+      </div>
+    </section>
+
+    <section id="safety" class="alt">
+      <div class="container">
+        <h2>Safe by construction</h2>
+        <p class="section-lead">
+          Audio IO Keeper only reads and writes the standard Core Audio default-device properties —
+          the exact same settings that <strong>System Settings → Sound</strong> uses. Quitting the
+          app leaves your Mac exactly as it was.
+        </p>
+        <div class="pill-list">
+          <span class="pill"><span class="dot"></span> App Sandbox + Hardened Runtime</span>
+          <span class="pill"><span class="dot"></span> Public Core Audio HAL only</span>
+          <span class="pill"><span class="dot"></span> Never records or plays audio</span>
+          <span class="pill"><span class="dot"></span> No drivers or system extensions</span>
+          <span class="pill"><span class="dot"></span> Zero network code</span>
+          <span class="pill"><span class="dot"></span> Swift 6 strict concurrency</span>
+        </div>
+      </div>
+    </section>
+
+    <section id="install">
+      <div class="container">
+        <h2>Install</h2>
+        <p class="section-lead">
+          Requires macOS 14 (Sonoma) or later. On first launch, Audio IO Keeper adopts your current
+          input and output as initial pins so protection starts immediately.
+        </p>
+        <ol class="steps">
+          <li>
+            Download <code>AudioIOKeeper-1.3.1.dmg</code> from
+            <a href="https://github.com/neuroccm/AudioIOKeeper/releases/latest">GitHub Releases</a>
+            (or build it yourself with <code>scripts/make-dmg.sh</code>).
+          </li>
+          <li>
+            Open the disk image, drag <strong>AudioIOKeeper</strong> onto
+            <strong>Applications</strong>, and eject the DMG.
+          </li>
+          <li>
+            Launch <strong>Audio IO Keeper</strong> from Applications. Look for the waveform icon in
+            your menu bar.
+          </li>
+          <li>
+            <strong>First launch only:</strong> release builds are ad-hoc signed (not notarized by
+            Apple yet). Right-click the app in Applications → <strong>Open</strong> →
+            <strong>Open</strong>, or open <strong>System Settings → Privacy &amp; Security</strong>
+            and click <strong>Open Anyway</strong> after the first blocked attempt.
+          </li>
+        </ol>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <div class="container footer-inner">
+      <span>Audio IO Keeper · MIT License · Copyright © 2026 Audio IO Keeper contributors</span>
+      <span>
+        <a href="https://github.com/neuroccm/AudioIOKeeper">Repository</a> ·
+        <a href="https://github.com/neuroccm/AudioIOKeeper/releases">Releases</a> ·
+        <a href="https://github.com/neuroccm/AudioIOKeeper/blob/main/CONTRIBUTING.md">Contributing</a>
+      </span>
+    </div>
+  </footer>
+</body>
+</html>

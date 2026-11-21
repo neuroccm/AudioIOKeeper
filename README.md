@@ -3,6 +3,8 @@
 A tiny native macOS menu-bar app that keeps your chosen audio **input** and
 **output** devices exactly where you put them.
 
+Project page: [neuroccm.github.io/AudioIOKeeper](https://neuroccm.github.io/AudioIOKeeper/) (source in [`docs/index.html`](docs/index.html)).
+
 macOS loves to switch audio devices on its own: take out an AirPod, walk near
 your iPhone, plug in a display — and your mic or speakers silently change
 mid-call. Audio IO Keeper pins the devices you choose in the app and, whenever
@@ -10,10 +12,14 @@ macOS moves a default on its own, moves it straight back.
 
 ## How it works
 
-- Each device in the menu-bar popover has a pin beside it. Click a device's
+- Each device in the menu-bar popover has a pin beside it. Click a device or its
   pin to lock it in: the pin turns blue, that device is used right away, and
   it stays locked. Click the blue pin again (or right-click the device) to
-  unpin/unlock it. Clicking a device name also uses and pins it.
+  unpin/unlock it. You can also select or unpin locked devices directly in
+  **Settings → Locked devices** (including locking macOS system alert sounds
+  to your pinned output). Duplicate device names (such as dual displays or
+  HDMI + DisplayPort audio on the same monitor) are automatically labeled with
+  their connection type.
 - The app listens for Core Audio default-device changes. If a default drifts
   away from your pin (AirPods removed, Continuity iPhone mic appearing, a new
   display grabbing audio…), it is restored right away.
@@ -127,6 +133,7 @@ Developer ID, which the project does not have yet.
 | `AudioIOKeeperApp.swift` | App entry point, menu-bar scene, launch-time keeper start |
 | `AppModel.swift` | Single source of truth (`@Observable`, `@MainActor`) — state, enforcement, activity log |
 | `KeeperEngine.swift` | Pure, hardware-free decision logic: restore-or-not, plus the anti-thrash `RestoreThrottle` |
+| `AudioDevice.swift` | Value types (`AudioDevice`, `AudioDirection`, `TransportType`, `ActivityEntry`), hardware protocol, duplicate-name disambiguation |
 | `AudioHardwareWorker.swift` | Serializes all HAL calls on a dedicated queue off the main thread; coalesced change pings; sequenced snapshots so stale reads can't overwrite newer writes |
 | `AudioHardwareClient.swift` | The one place that talks to Core Audio (behind a protocol for testing) |
 | `SettingsStore.swift` | Typed `UserDefaults` access; pins stored as persistent device UIDs |

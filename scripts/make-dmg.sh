@@ -11,8 +11,19 @@
 set -eu
 
 cd "$(dirname "$0")/.."
-DERIVED="${TMPDIR:-/tmp}/AudioIOKeeperDerived"
-STAGING="${TMPDIR:-/tmp}/AudioIOKeeperDMG"
+WORK_DIR="$(mktemp -d "${TMPDIR:-/tmp}/AudioIOKeeperBuild.XXXXXX")"
+DERIVED="$WORK_DIR/DerivedData"
+STAGING="$WORK_DIR/DMGStaging"
+RW_DMG="$WORK_DIR/AudioIOKeeper-rw.dmg"
+MOUNT_POINT="$WORK_DIR/Mount"
+
+cleanup() {
+  if [ -d "$MOUNT_POINT" ] && mount | grep -Fq "on $MOUNT_POINT "; then
+    hdiutil detach "$MOUNT_POINT" -quiet || hdiutil detach "$MOUNT_POINT" -force -quiet || true
+  fi
+  rm -rf "$WORK_DIR"
+}
+trap cleanup EXIT INT TERM
 
 # Preflight: a full Xcode install is required. With only the Command Line
 # Tools selected, xcodebuild fails with a confusing error, so check early.
@@ -43,7 +54,7 @@ xcodebuild build \
   -project AudioIOKeeper.xcodeproj \
   -scheme AudioIOKeeper \
   -configuration Release \
-  -destination 'platform=macOS' \
+  -destination 'generic/platform=macOS' \
   -derivedDataPath "$DERIVED" \
   CODE_SIGN_IDENTITY=- CODE_SIGN_STYLE=Manual CODE_SIGNING_REQUIRED=YES
 
@@ -53,8 +64,7 @@ OUT="${1:-./AudioIOKeeper-$VERSION.dmg}"
 
 codesign --verify --strict "$APP"
 
-rm -rf "$STAGING"
-mkdir -p "$STAGING"
+mkdir -p "$STAGING" "$MOUNT_POINT"
 cp -R "$APP" "$STAGING/"
 ln -s /Applications "$STAGING/Applications"
 cp packaging/README.txt "$STAGING/README.txt"
@@ -63,11 +73,7 @@ cp LICENSE "$STAGING/LICENSE"
 cp packaging/AudioIOKeeper.icns "$STAGING/.VolumeIcon.icns"
 
 rm -f "$OUT"
-RW_DMG="${TMPDIR:-/tmp}/AudioIOKeeper-rw.dmg"
-MOUNT_POINT="${TMPDIR:-/tmp}/AudioIOKeeperMount"
-rm -f "$RW_DMG"
 hdiutil create -volname "Audio IO Keeper" -srcfolder "$STAGING" -ov -format UDRW "$RW_DMG"
-mkdir -p "$MOUNT_POINT"
 hdiutil attach "$RW_DMG" -mountpoint "$MOUNT_POINT" -nobrowse -quiet
 # Flag the volume as having a custom icon so Finder uses .VolumeIcon.icns.
 if command -v SetFile >/dev/null 2>&1; then
@@ -75,7 +81,6 @@ if command -v SetFile >/dev/null 2>&1; then
 fi
 hdiutil detach "$MOUNT_POINT" -quiet
 hdiutil convert "$RW_DMG" -format UDZO -o "$OUT" -quiet
-rm -f "$RW_DMG"
 hdiutil verify "$OUT"
 echo "Created $OUT"
 echo "To install: open the DMG, drag AudioIOKeeper onto Applications, eject,"

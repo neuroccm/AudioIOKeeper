@@ -8,17 +8,8 @@ final class FakeClock: @unchecked Sendable {
 
     init(start: Date = Date(timeIntervalSince1970: 1_000_000)) { current = start }
 
-    func now() -> Date {
-        lock.lock()
-        defer { lock.unlock() }
-        return current
-    }
-
-    func advance(by seconds: TimeInterval) {
-        lock.lock()
-        current = current.addingTimeInterval(seconds)
-        lock.unlock()
-    }
+    func now() -> Date { lock.withLock { current } }
+    func advance(by seconds: TimeInterval) { lock.withLock { current = current.addingTimeInterval(seconds) } }
 }
 
 /// In-memory fake of the hardware worker.
@@ -30,8 +21,11 @@ final class FakeAudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
     private let lock = NSLock()
     private var _devices: [AudioDevice] = []
     private var _defaults: [AudioDirection: String?] = [:]
+    private var _systemOutputUID: String?
     private var sequence: UInt64 = 0
     private var _setDefaultCalls: [(uid: String, direction: AudioDirection)] = []
+    private var _systemOutputCalls: [String] = []
+    private var _remainingFailures: [AudioDirection: Int] = [:]
 
     /// Simulates another component reasserting its own default after every
     /// successful app write of the pinned UID (direction → rival UID).
@@ -55,26 +49,24 @@ final class FakeAudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
         set { locked { _devices = newValue } }
     }
 
-    var setDefaultCalls: [(uid: String, direction: AudioDirection)] {
-        locked { _setDefaultCalls }
-    }
+    var setDefaultCalls: [(uid: String, direction: AudioDirection)] { locked { _setDefaultCalls } }
+    var systemOutputCalls: [String] { locked { _systemOutputCalls } }
 
-    func setSystemDefault(_ uid: String?, for direction: AudioDirection) {
-        locked { _defaults[direction] = uid }
-    }
-
-    func systemDefault(for direction: AudioDirection) -> String? {
-        locked { _defaults[direction] ?? nil }
-    }
+    func setSystemDefault(_ uid: String?, for direction: AudioDirection) { locked { _defaults[direction] = uid } }
+    func systemDefault(for direction: AudioDirection) -> String? { locked { _defaults[direction] ?? nil } }
+    func setSystemAlertOutput(_ uid: String?) { locked { _systemOutputUID = uid } }
+    func systemAlertOutput() -> String? { locked { _systemOutputUID } }
+    func failNextWrites(_ count: Int, for direction: AudioDirection) { locked { _remainingFailures[direction] = count } }
 
     func ping() { pingContinuation.yield() }
-
     func start() {}
 
     func snapshot() async -> HardwareSnapshot {
         let captured = locked { () -> HardwareSnapshot in
             sequence += 1
-            return HardwareSnapshot(sequence: sequence, devices: _devices, defaults: _defaults)
+            return HardwareSnapshot(
+                sequence: sequence, devices: _devices, defaults: _defaults, defaultSystemOutputUID: _systemOutputUID
+            )
         }
         let shouldHold = locked { () -> Bool in
             let hold = holdNextSnapshot
@@ -89,9 +81,7 @@ final class FakeAudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
         return captured
     }
 
-    func holdNextSnapshotCapture() {
-        locked { holdNextSnapshot = true }
-    }
+    func holdNextSnapshotCapture() { locked { holdNextSnapshot = true } }
 
     func releaseHeldSnapshot() {
         let gate = locked { () -> CheckedContinuation<Void, Never>? in
@@ -101,24 +91,40 @@ final class FakeAudioHardwareWorker: AudioHardwareWorking, @unchecked Sendable {
         gate?.resume()
     }
 
-    var isSnapshotHeld: Bool {
-        locked { snapshotGate != nil }
-    }
+    var isSnapshotHeld: Bool { locked { snapshotGate != nil } }
 
-    func setDefaultDevice(uid: String, for direction: AudioDirection) async -> HardwareWriteResult {
+    func setDefaultDevice(
+        uid: String, for direction: AudioDirection, rollbackOnCancel: Bool
+    ) async -> HardwareWriteResult {
+        if Task.isCancelled { return HardwareWriteResult(sequence: 0, succeeded: false, wasSkipped: true) }
         let result = locked { () -> HardwareWriteResult in
             _setDefaultCalls.append((uid, direction))
-            _defaults[direction] = uid
             sequence += 1
+            if let remaining = _remainingFailures[direction], remaining > 0 {
+                _remainingFailures[direction] = remaining - 1
+                return HardwareWriteResult(sequence: sequence, succeeded: false)
+            }
+            _defaults[direction] = uid
             return HardwareWriteResult(sequence: sequence, succeeded: true)
         }
-        // The real HAL notifies listeners about our own write.
+        guard result.succeeded else { return result }
         ping()
-        // A competing writer answers by switching it back.
         if let rival = competitor[direction], rival != uid {
             locked { _defaults[direction] = rival }
             ping()
         }
+        return result
+    }
+
+    func setDefaultSystemOutputDevice(uid: String) async -> HardwareWriteResult {
+        if Task.isCancelled { return HardwareWriteResult(sequence: 0, succeeded: false, wasSkipped: true) }
+        let result = locked { () -> HardwareWriteResult in
+            _systemOutputCalls.append(uid)
+            _systemOutputUID = uid
+            sequence += 1
+            return HardwareWriteResult(sequence: sequence, succeeded: true)
+        }
+        ping()
         return result
     }
 
@@ -168,12 +174,15 @@ final class AppModelTests: XCTestCase {
         worker.setSystemDefault("usb-mic", for: .input)
 
         let clock = self.clock!
-        model = AppModel(worker: worker, settings: settings, now: { clock.now() })
+        model = AppModel(
+            worker: worker, settings: settings, loginItem: FakeLoginItemManager(), now: { clock.now() }
+        )
         model.start()
         try await settle { model.pinnedUID(for: .output) == "speakers" }
     }
 
     override func tearDown() async throws {
+        model?.stop()
         UserDefaults(suiteName: suiteName)?.removePersistentDomain(forName: suiteName)
     }
 
@@ -348,7 +357,10 @@ final class AppModelTests: XCTestCase {
         localWorker.setSystemDefault("usb-mic", for: .input)
 
         let clock = self.clock!
-        let relaunched = AppModel(worker: localWorker, settings: localSettings, now: { clock.now() })
+        let relaunched = AppModel(
+            worker: localWorker, settings: localSettings, loginItem: FakeLoginItemManager(), now: { clock.now() }
+        )
+        defer { relaunched.stop() }
         relaunched.start()
         try await settle { relaunched.currentUID(for: .output) == "airpods" }
 

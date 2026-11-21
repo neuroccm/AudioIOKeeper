@@ -3,8 +3,8 @@ import SwiftUI
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
 
-    // Reads of pins / temporary-unlock state go through AppModel accessors
-    // that track settingsRevision, so this window refreshes on changes.
+    private static let unlockedSelectionTag = "__unlocked__"
+
     var body: some View {
         Form {
             lockedDevicesSection
@@ -13,13 +13,21 @@ struct SettingsView: View {
             aboutSection
         }
         .formStyle(.grouped)
-        .frame(width: 420)
+        .frame(width: 460)
+        .onAppear {
+            model.refreshOnMenuOpen()
+            model.refreshLoginItemStatus()
+        }
     }
 
     private var lockedDevicesSection: some View {
         Section("Locked devices") {
             pinnedRow(.output)
             pinnedRow(.input)
+            Toggle("Also lock system sound effects to output", isOn: lockSystemOutputBinding)
+            Text("Keeps macOS alert sounds and dictation chimes on your locked output device when supported.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             Text(pinHelpText)
                 .font(.caption)
                 .foregroundStyle(.secondary)
@@ -33,6 +41,7 @@ struct SettingsView: View {
                 Button("Temporarily unlock pins for \(Int(AppModel.defaultPauseDuration / 60)) minutes") {
                     model.pauseKeeping()
                 }
+                .disabled(!model.isKeepingAnything)
             }
             Text(temporaryUnlockHelpText)
                 .font(.caption)
@@ -53,6 +62,21 @@ struct SettingsView: View {
     private var startupSection: some View {
         Section("Startup") {
             Toggle("Launch at login", isOn: launchAtLoginBinding)
+            if model.loginItemNeedsApproval {
+                HStack {
+                    Text("Requires approval in System Settings → General → Login Items.")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                    Spacer()
+                    Button("Open Login Items…") { model.openLoginItemsSettings() }
+                        .controlSize(.small)
+                }
+            }
+            if let error = model.loginItemError {
+                Text("Could not update login item: \(error)")
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
         }
     }
 
@@ -84,38 +108,69 @@ struct SettingsView: View {
     }
 
     private var launchAtLoginBinding: Binding<Bool> {
-        Binding(get: { model.launchAtLogin }, set: { model.launchAtLogin = $0 })
+        Binding(get: { model.launchAtLogin }, set: { model.setLaunchAtLogin($0) })
     }
 
-    /// One direction's stored pin, with a permanent Unpin. Needed because a
-    /// disconnected pinned device has no popover row (or pin button) to
-    /// unpin from, while its stored pin would otherwise be unremovable
-    /// until the device returns.
+    private var lockSystemOutputBinding: Binding<Bool> {
+        Binding(get: { model.lockSystemOutput }, set: { model.setLockSystemOutput($0) })
+    }
+
+    private func pinPickerBinding(for direction: AudioDirection) -> Binding<String> {
+        Binding(
+            get: {
+                guard model.keepingEnabled(for: direction), let uid = model.pinnedUID(for: direction) else {
+                    return Self.unlockedSelectionTag
+                }
+                return uid
+            },
+            set: { newTag in
+                if newTag == Self.unlockedSelectionTag {
+                    model.unpinDevice(for: direction)
+                } else if let device = model.devices(for: direction).first(where: { $0.uid == newTag }) {
+                    model.selectDevice(device, for: direction)
+                }
+            }
+        )
+    }
+
     @ViewBuilder
     private func pinnedRow(_ direction: AudioDirection) -> some View {
-        let label = "\(direction.displayName) pinned to"
-        if let name = model.pinnedName(for: direction) {
-            HStack {
-                Text(label)
-                Spacer()
-                Text(name)
-                    .foregroundStyle(.secondary)
-                Button("Unpin") { model.unpinDevice(for: direction) }
-                    .accessibilityLabel("Unpin \(direction.displayName) \(name)")
+        let available = model.devices(for: direction)
+        let pinnedUID = model.pinnedUID(for: direction)
+        let isLocked = pinnedUID != nil && model.keepingEnabled(for: direction)
+        let isDisconnectedPin = pinnedUID != nil && !available.contains { $0.uid == pinnedUID }
+        HStack {
+            Picker("\(direction.displayName) lock", selection: pinPickerBinding(for: direction)) {
+                Text("Not locked (macOS switches freely)")
+                    .tag(Self.unlockedSelectionTag)
+                if !available.isEmpty || isDisconnectedPin {
+                    Divider()
+                }
+                if isDisconnectedPin, let uid = pinnedUID {
+                    let stored = model.pinnedName(for: direction) ?? uid
+                    Text("\(stored) (disconnected)")
+                        .tag(uid)
+                }
+                ForEach(available) { device in
+                    let label = model.displayName(for: device, direction: direction)
+                    let currentSuffix = model.currentUID(for: direction) == device.uid ? " — in use" : ""
+                    Text("\(label)\(currentSuffix)")
+                        .tag(device.uid)
+                }
             }
-        } else {
-            LabeledContent(label, value: "Nothing (not locked)")
+            if isLocked || pinnedUID != nil {
+                Button("Unpin") { model.unpinDevice(for: direction) }
+                    .controlSize(.small)
+                    .accessibilityLabel("Unpin \(direction.displayName)")
+            }
         }
     }
 
     private var pinHelpText: String {
-        "A pinned device is locked in as the one being used: if macOS "
-            + "switches away on its own (AirPods taken out, a nearby iPhone "
-            + "offering itself as a mic…), Audio IO Keeper switches straight "
-            + "back. To pin or unpin, use the pin beside each device in the "
-            + "menu-bar popover — blue pin means locked, click it again to "
-            + "unlock. Unpin above also works while a pinned device is "
-            + "disconnected, when its popover row is hidden."
+        "Choose a device above or click its pin in the menu-bar popover to "
+            + "lock it in: if macOS switches away on its own (AirPods taken out, "
+            + "a nearby iPhone offering itself as a mic…), Audio IO Keeper "
+            + "switches straight back."
     }
 
     private var temporaryUnlockHelpText: String {

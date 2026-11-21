@@ -1,159 +1,99 @@
 # Audio IO Keeper — Session Handover
 
-Written 2026-10-23 (late evening session). Read this first in the next session.
+Updated: **2026-11-20 (23:12 EST)**. Read this first in the next session.
 
 ## What this app is
 
-Native Swift macOS menu-bar app ("Audio IO Keeper", macOS 14+, Swift 6 strict
-concurrency, App Sandbox + Hardened Runtime). It pins the user's chosen
-default input/output devices and restores them whenever macOS switches
-defaults automatically (AirPods removed, iPhone Continuity mic, displays
-grabbing audio). Public Core Audio APIs only; no drivers/extensions; every
-action shown in an activity log. Full details: `README.md`, `CONTRIBUTING.md`.
+Native Swift macOS menu-bar app (**Audio IO Keeper**, macOS 14+, Swift 6 strict concurrency, App Sandbox + Hardened Runtime). It pins the user's chosen default input and output audio devices (plus optional system sound-effects output) and restores them whenever macOS switches defaults automatically (AirPods removed, iPhone Continuity mic appearing, USB mics hijacking speaker output, displays grabbing audio). Uses public Core Audio HAL properties only; no drivers, extensions, or audio capture/playback; every action is logged in the popover's activity log and `OSLog`.
 
-Repository: https://github.com/neuroccm/AudioIOKeeper (public, MIT)
-Local canonical copy: `/Users/houman/Downloads/AudioIOKeeper` (see sync note)
-Working clone used this session: `/tmp/AudioIOKeeper-work` (ephemeral, clean)
+- Repository: `https://github.com/neuroccm/AudioIOKeeper` (public, MIT)
+- Canonical local workspace: `/Users/houman/Downloads/AudioIOKeeper`
 
-## Current state
+---
 
-GitHub `main` = `0c77bea` — "Stability: anti-thrash restore throttling +
-off-main-thread HAL worker". CI green on every push so far (GitHub Actions
-job "Build, test, lint": XcodeGen freshness, SwiftLint --strict,
-`xcodebuild test`, 25 unit tests).
+## Current state (1.3.1, build 10 — released on `main`, tagged `v1.3.1`)
 
-Commit history:
+- **Git `main` / tag `v1.3.1`:** Includes all **v1.3.1 (build 10)** fixes & augmentations, updated Markdown documentation (`README.md`, `HANDOVER.md`, `packaging/README.txt`), and a new GitHub Pages site (`docs/index.html` + `docs/icon.png`).
+- **Built & verified Release DMGs (Universal `arm64` + `x86_64`, ad-hoc signed with Hardened Runtime + App Sandbox, `hdiutil verify` valid):**
+  - `/Users/houman/Desktop/AudioIOKeeper-1.3.1.dmg`
+  - `/Users/houman/Downloads/AudioIOKeeper/AudioIOKeeper-1.3.1.dmg`
+- **Test suite:** **61 / 61 unit & regression tests passing** (`xcodebuild test -project AudioIOKeeper.xcodeproj -scheme AudioIOKeeper -destination platform=macOS CODE_SIGNING_ALLOWED=NO`), zero Swift 6 strict-concurrency warnings.
 
-1. `35baa05` Initial release (app, tests, CI, CodeRabbit config, docs)
-2. `6ba23bb` CI: actions/checkout v5
-3. `0c77bea` Stability implementation (below) + Rescan button
+---
 
-### Implemented
+## What was diagnosed, fixed, and augmented in 1.3.1
 
-- Keeper engine (`AudioIOKeeper/KeeperEngine.swift`): pure restore decision
-  + `RestoreThrottle` per direction — 3 immediate restores/60 s window,
-  then exponential cooldowns 2 s → 60 s, one retry per cooldown,
-  quiet-period + on-user-change reset, `.conflicted` UI status.
-- HAL worker (`AudioIOKeeper/AudioHardwareWorker.swift`): all Core Audio
-  reads/writes serialized on a dedicated queue off the main thread;
-  coalesced/debounced change pings; sequenced snapshots, stale results
-  rejected by `AppModel`.
-- `AppModel` reconcile loop (async), pins stored as persistent device UIDs,
-  first-launch adopts current defaults as pins, activity log (cap 12),
-  Launch-at-login via `SMAppService`.
-- Rescan button (popover header + Settings → Devices): forces a fresh
-  hardware snapshot + pin re-check (dock/hub moves).
-- Tests (`AudioIOKeeperTests/`): fake worker emits own-write notifications
-  and models a competing writer; coverage for throttling, stale snapshot,
-  rescan-restore, throttle policy, engine, settings. 25 tests, CI-passing.
-- CodeRabbit: `.coderabbit.yaml` committed (assertive profile, auto-review
-  on every PR, path instructions). **The user states the CodeRabbit GitHub
-  App already has all their repos allowed** — so PRs should be reviewed
-  automatically. No PR has been opened yet to prove it end-to-end.
+### 1. Root causes of the "devices not detecting / selectable to pin" bug
 
-### Verified on real hardware (initial build, `35baa05` era)
+1. **Collapsed `0 pt` device list in `MenuBarExtra(.window)` (`AudioIOKeeper/MenuContentView.swift`):**
+   - `ViewThatFits(in: .vertical)` previously fell back to `ScrollView { devicesStack }.frame(maxHeight: 360)` with no minimum/fixed height.
+   - Because `model.devices` starts empty at launch and populates asynchronously from `AudioHardwareWorker`, `NSHostingController.sizeThatFits(in: .zero)` collapsed the `ScrollView` branch (`178 pt` total window height — fitting only Header + Activity Log + Footer, leaving `0 px` for Output/Input rows) once 8 devices (9 rows) + log entries arrived.
+   - **Fix:** Replaced `ViewThatFits` with deterministic sizing: `<= 10` combined rows render `devicesStack.fixedSize(horizontal: false, vertical: true)` directly; `> 10` rows use `ScrollView { devicesStack }.frame(height: 360)` so `minHeight` is never `0`. Also added `.onAppear { model.refreshOnMenuOpen() }`.
+   - **Regression guard:** `MenuBarSymbolTests.testMenuContentViewNeverCollapsesWhenDevicesPopulateAsynchronously`.
 
-- Ran the sandboxed app on the user's Mac; pins adopted automatically:
-  output = Scarlett Solo USB, input = Yeti Nano.
-- Externally switched output → MacBook Pro Speakers: app restored Scarlett
-  within ~2 s. Switched input → iPhone Continuity mic: restored Yeti
-  immediately. Probe used: `/tmp/audio_probe` (source `/tmp/audio_probe.swift`,
-  supports `set-output <UID>` / `set-input <UID>`; default invocation lists
-  devices + current defaults). Rebuild it with
-  `swiftc -O -o /tmp/audio_probe /tmp/audio_probe.swift -framework CoreAudio`.
-- An early bug was caught this way: keeper must start in the AppDelegate,
-  NOT from the menu popover's `onAppear` (MenuBarExtra content is lazy).
+2. **Button hit-testing wedge in non-activating `MenuBarExtra` panels (`AudioIOKeeper/MenuContentView.swift`):**
+   - Unified logs (`com.apple.AppKit:Gestures` → `GesturePhaseQueue.InvalidTransition Code=1`, `Marking view as no longer exclusive`) showed `.buttonStyle(.plain)` SwiftUI gesture buttons wedging inside the non-activating `MenuBarExtra` window alongside `.contextMenu`.
+   - **Fix:** Switched both the device-row button and the pin button to `.buttonStyle(.borderless)` (with explicit `.foregroundStyle(.primary)` on the label), which backs each control with a native AppKit `NSButton` (`SwiftUIAppKitButton`) that accepts first-mouse clicks immediately.
 
-## The one outstanding task — DONE (2026-10-24)
+3. **Core Audio hot-plug, slow-waking displays/docks, and HAL plugin quirks (`AudioIOKeeper/AudioHardwareClient.swift`):**
+   - **Per-device HAL listeners (`syncDeviceListeners`):** Added wildcard-scope listeners on each `AudioObjectID` for `IsAlive`, `StreamConfiguration`, `IsHidden`, `CanBeDefaultDevice`, `Name`, and `DataSource`. Docks, DisplayPort/HDMI monitors, and Bluetooth headsets often finish initializing streams/liveness *after* `kAudioHardwarePropertyDevices` has already fired; per-device listeners catch those transitions automatically without manual rescanning.
+   - **Driver fallbacks & memory safety:**
+     - `isDeviceAlive` now defaults to `true` via `uint32PropertyIfPresent` when a virtual/aggregate driver omits `kAudioDevicePropertyDeviceIsAlive`.
+     - `canBeDefaultDevice` / `canBeDefaultSystemDevice` check directional scope first, then fall back to `kAudioObjectPropertyScopeGlobal` before defaulting to `true`.
+     - `hasSelectableChannels` falls back to `kAudioDevicePropertyStreams` when `StreamConfiguration` is not implemented, and clamps `AudioBufferList.mNumberBuffers` to the allocated byte count *before* constructing `UnsafeMutableAudioBufferListPointer`.
+     - `deviceID(forUID:)` uses `kAudioHardwarePropertyTranslateUIDToDevice` (O(1)) and falls back to scanning `deviceObjectIDs()` if a virtual driver omits UID translation.
+     - Watches `kAudioHardwarePropertyServiceRestarted` to tear down and re-install HAL listeners cleanly if `coreaudiod` restarts.
 
-**Build & run the current code locally and re-run the live
-switch-and-restore check: completed.** On the 1.1.0 tree (stability work
-plus the release polish below): 25 unit tests pass locally, ad-hoc Debug
-build launched, and with present-device pins the probe check passed in
-both directions — output switched to the BenQ display was restored to
-MacBook Pro Speakers within ~3 s, and input switched to the iPhone
-Continuity mic was restored to MacBook Pro Microphone. The user's stored
-pins (Scarlett Solo USB / Yeti Nano, both disconnected at the time) and
-the pre-test system defaults were restored afterwards and verified. The
-waiting behavior for a disconnected pin was also observed live
-(no forced switch).
+### 2. Augmentations included in 1.3.1
 
-Also completed since: real app icon (all sizes + `packaging/` sources),
-native About panel from the popover plus an expanded Settings → About,
-single-lookup device resolution for restores
-(`kAudioHardwarePropertyDeviceForUID`), version 1.1.0, and
-`scripts/make-dmg.sh` producing `AudioIOKeeper-1.1.0.dmg` (app +
-Applications shortcut + `packaging/README.txt` + LICENSE; ad-hoc signed,
-not notarized). The Downloads copy is synced with GitHub `main`; the
-stale partial `KeeperEngine.swift` edits are gone, and
-`audioiokeeper-stability-review.md` is committed (original file, with a
-Resolution section) at the user's request.
+- **Duplicate device name disambiguation (`AudioIOKeeper/AudioDevice.swift`, `AudioIOKeeper/AudioIOKeeperApp.swift`):**
+  - On setups like the user's dual `BenQ EX3203R` endpoints (`HDMI` + `DisplayPort`), `AudioDevice.disambiguatedNames(for:)` qualifies colliding names by port (`BenQ EX3203R (HDMI)` vs `BenQ EX3203R (DisplayPort)`), or appends a 4-char UID token (`BenQ EX3203R (DisplayPort · 4E78)`) if both name and port match. Unique names stay untouched.
+- **Direct device selection & pinning in Settings (`AudioIOKeeper/SettingsView.swift`):**
+  - Upgraded **Settings → Locked devices** from static text to interactive `Picker` menus + `Unpin` buttons for both Output and Input (including disconnected-pin display), plus a toggle for locking system alert/sound-effects output (`kAudioHardwarePropertyDefaultSystemOutputDevice`) and `SMAppService` approval/error feedback (`AudioIOKeeper/LoginItemManager.swift`).
+- **Post-wake & transient failure resilience (`AudioIOKeeper/AppModel.swift`, `AudioIOKeeper/SettingsStore.swift`, `AudioIOKeeper/AudioHardwareWorker.swift`, `AudioIOKeeper/KeeperEngine.swift`):**
+  - `handleSystemWake()` reconciles immediately on `NSWorkspace.didWakeNotification` *and* runs a 1.5 s follow-up scan (`wakeFollowUpDelay`) for slow-waking DisplayPort/HDMI/dock audio.
+  - Queued/in-flight HAL write cancellation with rollback on unpin (`WriteCancellation`), transient write-failure logging & 1 s retry scheduling, and monotonic `RestoreThrottle` backoff with continuous `stableSince` quiet-period reset.
+- **Universal Release DMG (`scripts/make-dmg.sh`):**
+  - Uses `-destination 'generic/platform=macOS'` so Release builds produce a Universal (`arm64` + `x86_64`) app bundle, staged into an isolated `mktemp -d` directory with `trap` cleanup.
 
-## Environment gotchas (why the local build is outstanding)
+---
 
-This session's shell environment degraded mid-work; both issues are
-machine/session state, not code:
+## Architecture & guardrails (do not break)
 
-1. **macOS TCC vs `~/Downloads`:** reads/writes intermittently return
-   "Operation not permitted". The responsible process is **Terminal.app**
-   (Muse CLI runs inside it; there is no "Muse Code" TCC entry).
-   Fix: System Settings → Privacy & Security → Files and Folders →
-   Terminal → enable Downloads Folder (or Full Disk Access), then
-   **fully restart Terminal** — grants apply to fresh processes. Moving
-   the repo out of `~/Downloads` (e.g. `~/Developer`) also sidesteps it.
-   Symptom check: `cat audioiokeeper-stability-review.md` in the repo.
-2. **Nested sandbox failure:** Swift builds died with
-   `sandbox-exec: sandbox_apply: Operation not permitted` and
-   `xcodebuild test` with "Failed to prevent system sleep" (-536870199).
-   A fresh Terminal/session is expected to clear this. Until then,
-   CI is the build/test gate of record.
+| File | Lines | Responsibility & constraints |
+| --- | ---: | --- |
+| `AudioIOKeeper/AudioHardwareClient.swift` | 395 | **Only** file allowed to import `CoreAudio` or call Core Audio C APIs (enforced by `.coderabbit.yaml`). |
+| `AudioIOKeeper/AudioDevice.swift` | 183 | Value types (`AudioDirection`, `TransportType`, `AudioDevice`, `ActivityEntry`) + `AudioHardwareClient` protocol + name disambiguation. |
+| `AudioIOKeeper/AudioHardwareWorker.swift` | 284 | Serialized off-main-thread HAL queue, debounced change pings, sequenced snapshots, cancellation/rollback. |
+| `AudioIOKeeper/KeeperEngine.swift` | 211 | Pure, hardware/I/O-free `KeeperEngine`, `RestoreThrottle`, `DirectionStatus`. Any logic change requires unit tests. |
+| `AudioIOKeeper/AppModel.swift` | 378 | `@MainActor` `@Observable` state, user actions, reconcile & enforcement loop. |
+| `AudioIOKeeper/SettingsStore.swift` | 233 | `UserDefaults` persistence + `AppModel` persistence, pause/resume, rescan, and wake helpers. |
+| `AudioIOKeeper/AudioIOKeeperApp.swift` | 179 | Entry point (`AppDelegate` starts keeper at launch + wake observer), `MenuBarExtra` scene, derived UI accessors. |
+| `AudioIOKeeper/MenuContentView.swift` | 349 | Menu-bar popover UI. Keep `.buttonStyle(.borderless)` and deterministic non-`ViewThatFits` sizing. |
+| `AudioIOKeeper/SettingsView.swift` | 199 | Settings window (Output/Input lock pickers, system sound effects toggle, 15-min unlock, Launch at login). |
+| `AudioIOKeeper/LoginItemManager.swift` | 81 | `LoginItemManaging` protocol + `SMAppService.mainApp` wrapper. |
 
-Because of (1), this session's stability work was done in a clean clone at
-`/tmp/AudioIOKeeper-work` and pushed from there. Consequences for the
-Downloads copy:
+### Strict CI / lint / privacy invariants
 
-- It is still at `6ba23bb` with **two uncommitted partial edits** to
-  `KeeperEngine.swift` (an early draft of the throttle/status changes —
-  fully superseded by `0c77bea`; discard with the checkout command above).
-- `audioiokeeper-stability-review.md` (the review document, user-owned)
-  sits **untracked** in that folder. It was read in full and implemented;
-  it was NOT committed (don't commit a retyped copy; if the user wants it
-  in the repo, commit the original file itself).
+1. **SwiftLint (`swiftlint --strict` in `.github/workflows/ci.yml`):**
+   - `file_length <= 400` (warning = error under `--strict`), `type_body_length <= 300`, `function_body_length <= 50`, `line_length <= 130` (non-comment), `identifier_name >= 2` (`id` excluded), plus `empty_count`, `explicit_init`, `fatal_error_message`, `first_where`. Every Swift file in `AudioIOKeeper/` and `AudioIOKeeperTests/` currently satisfies these limits.
+2. **XcodeGen sync (`project.yml` ↔ `AudioIOKeeper.xcodeproj`):**
+   - `xcodegen` and `swiftlint` are **not** installed locally on this Mac, so if you edit `project.yml` (especially adding/removing files or build settings), update `AudioIOKeeper.xcodeproj/project.pbxproj` identically (or install `xcodegen` and run `xcodegen generate`) before pushing — CI fails if `xcodegen generate` produces a diff.
+3. **App Sandbox entitlements (`AudioIOKeeper/AudioIOKeeper.entitlements`):**
+   - Keep `com.apple.security.app-sandbox = true` **without** `com.apple.security.device.audio-input`. Core Audio HAL device enumeration (both input and output) and default-device switching work inside App Sandbox without `audio-input`; leaving it out avoids unnecessary Microphone TCC prompts and preserves the "never records audio" safety guarantee.
 
-## Key files
+---
 
-| File | Role |
-| --- | --- |
-| `AudioIOKeeper/AudioIOKeeperApp.swift` | Entry point; AppDelegate starts keeper at launch |
-| `AudioIOKeeper/AppModel.swift` | `@Observable` state, reconcile loop, enforcement, activity log |
-| `AudioIOKeeper/KeeperEngine.swift` | Pure decisions: `KeeperEngine`, `RestoreThrottle`, `DirectionStatus` |
-| `AudioIOKeeper/AudioHardwareWorker.swift` | Serialized async HAL queue, snapshots, ping coalescing |
-| `AudioIOKeeper/AudioHardwareClient.swift` | Only file calling Core Audio C APIs |
-| `AudioIOKeeper/SettingsStore.swift` | UserDefaults: pins (UIDs), keep toggles |
-| `AudioIOKeeper/MenuContentView.swift` | Popover UI incl. Rescan, conflict state |
-| `project.yml` | XcodeGen source of truth (run `xcodegen generate` after edits; CI enforces freshness) |
-| `.github/workflows/ci.yml`, `.swiftlint.yml`, `.coderabbit.yaml` | CI gate, lint, auto-review config |
+## Local environment gotchas (macOS 27.2.1 / Xcode 27.2)
 
-## Product decisions already made (don't re-litigate silently)
+- **Nested sandbox & `xcodebuild`:** Running `xcodebuild` inside a sandboxed agent shell fails because Swift's `@Observable` macro server (`swift-plugin-server`) calls `sandbox_apply` (`Operation not permitted`) and `xcodebuild test` calls `IOPMAssertionCreateWithName` (`-536870199`). Run `xcodebuild test` and `scripts/make-dmg.sh` outside the inner CLI sandbox.
+- **Zsh `log` builtin:** Always invoke `/usr/bin/log show --info --predicate 'subsystem == "com.neuroccm.AudioIOKeeper"'` (not bare `log`, which hits zsh's builtin).
+- **Sandboxed preferences path:** The installed app stores `UserDefaults` in `~/Library/Containers/com.neuroccm.AudioIOKeeper/Data/Library/Preferences/com.neuroccm.AudioIOKeeper.plist` (not `~/Library/Preferences/`).
 
-- Bundle ID `com.neuroccm.AudioIOKeeper`; MIT license; macOS 14 minimum.
-- Disconnected pinned device: wait and restore on return, never substitute.
-- During a competing-writer conflict, restoration is intentionally NOT
-  instant (throttled) — documented in README.
-- Branch protection on `main` intentionally left OFF (user's direct pushes
-  must keep working); recommended to the user as optional.
-- App icon: waveform + padlock, generated into
-  `AppIcon.appiconset` (sources in `packaging/`); menu-bar icon is an SF
-  Symbol status light. Public .app releases need a paid Developer ID for
-  signing/notarization — not yet set up (DMG builds are ad-hoc signed).
+---
 
-## Suggested next steps after the local build
+## Suggested next steps
 
-1. Open a small PR to prove CodeRabbit auto-review fires (user says the app
-   is installed account-wide).
-2. Design a real app icon.
-3. Release build + notarization once a Developer ID is available;
-   optionally wire `/tmp/audio_probe`-style checks into a manual QA note.
-4. Delete this file or fold what's still relevant into `CONTRIBUTING.md`
-   once the local build is done — it documents one session's state, not
-   evergreen project docs.
+1. Enable GitHub Pages in repo **Settings → Pages** (Source: **Deploy from a branch**, Branch: `main`, Folder: `/docs`) so `docs/index.html` is served at `https://neuroccm.github.io/AudioIOKeeper/`.
+2. Create the GitHub Release for tag `v1.3.1` and attach `AudioIOKeeper-1.3.1.dmg`.
+3. Verify the GitHub Actions CI run on `main` (`xcodegen generate` sync, `swiftlint --strict`, and `xcodebuild test`).

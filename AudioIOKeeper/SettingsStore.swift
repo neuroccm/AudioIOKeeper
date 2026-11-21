@@ -23,6 +23,7 @@ struct SettingsStore: @unchecked Sendable {
         static let pinnedInputName = "pinnedInputDeviceName"
         static let pinnedOutputName = "pinnedOutputDeviceName"
         static let pausedUntil = "keepingPausedUntil"
+        static let lockSystemOutput = "lockSystemOutputEnabled"
         static let didAdoptInitialPins = "didAdoptInitialPins"
         static let didAdoptInitialInputPin = "didAdoptInitialInputPin"
         static let didAdoptInitialOutputPin = "didAdoptInitialOutputPin"
@@ -66,15 +67,20 @@ struct SettingsStore: @unchecked Sendable {
         }
     }
 
-    /// Whether first-launch adoption of the then-current defaults as pins
-    /// has already happened. Persisted so a deliberate unpin is not undone
-    /// by the next launch re-pinning whatever happens to be current.
-    func didAdoptInitialPins() -> Bool {
-        defaults.bool(forKey: Key.didAdoptInitialPins)
+    /// Whether locking output also keeps system alert/sound-effect output
+    /// (`kAudioHardwarePropertyDefaultSystemOutputDevice`) on the pinned output.
+    /// Defaults to on so macOS chimes and dictation cues follow the pinned output.
+    func lockSystemOutputEnabled() -> Bool {
+        defaults.object(forKey: Key.lockSystemOutput) as? Bool ?? true
     }
 
-    func setDidAdoptInitialPins() {
-        defaults.set(true, forKey: Key.didAdoptInitialPins)
+    func setLockSystemOutputEnabled(_ enabled: Bool) {
+        defaults.set(enabled, forKey: Key.lockSystemOutput)
+    }
+
+    /// Legacy global marker read as fallback for pre-1.3 installs.
+    func didAdoptInitialPins() -> Bool {
+        defaults.bool(forKey: Key.didAdoptInitialPins)
     }
 
     /// Per-direction adoption: a direction whose default was unreadable on
@@ -100,6 +106,128 @@ struct SettingsStore: @unchecked Sendable {
         } else {
             defaults.removeObject(forKey: uidKey)
             defaults.removeObject(forKey: nameKey)
+        }
+    }
+}
+
+// MARK: - AppModel settings & pause state
+
+extension AppModel {
+
+    func loadPersistedState() {
+        for direction in AudioDirection.allCases {
+            keepingFlags[direction] = settings.keepingEnabled(for: direction)
+            if let uid = settings.pinnedUID(for: direction) { pinnedUIDs[direction] = uid }
+            if let name = settings.pinnedName(for: direction) { pinnedNames[direction] = name }
+        }
+        pausedUntil = settings.pausedUntil()
+        lockSystemOutput = settings.lockSystemOutputEnabled()
+    }
+
+    func storePin(uid: String?, name: String?, for direction: AudioDirection) {
+        settings.setPin(uid: uid, name: name, for: direction)
+        if uid != nil {
+            settings.setDidAdoptInitialPin(for: direction)
+        }
+        pinnedUIDs[direction] = uid
+        pinnedNames[direction] = uid == nil ? nil : name
+    }
+
+    func storeKeeping(_ enabled: Bool, for direction: AudioDirection) {
+        settings.setKeepingEnabled(enabled, for: direction)
+        keepingFlags[direction] = enabled
+    }
+
+    func storePausedUntil(_ date: Date?) {
+        settings.setPausedUntil(date)
+        pausedUntil = date
+    }
+
+    func setLockSystemOutput(_ enabled: Bool) {
+        guard lockSystemOutput != enabled else { return }
+        lockSystemOutput = enabled
+        settings.setLockSystemOutputEnabled(enabled)
+        systemOutputThrottle.reset()
+        log("System sound effects lock \(enabled ? "on" : "off")")
+        if enabled { requestReconcile(reason: "after enabling system sound lock") }
+    }
+
+    /// Temporarily unlocks both pins; only automatic restores hold off.
+    func pauseKeeping(for duration: TimeInterval = AppModel.defaultPauseDuration) {
+        guard duration > 0 else { return }
+        let until = now().addingTimeInterval(duration)
+        storePausedUntil(until)
+        cancelActiveRestoresAndResetThrottles()
+        scheduleResume(at: until)
+        log("Paused keeping for \(Self.formatDuration(duration)) — macOS may switch freely")
+    }
+
+    /// Ends a temporary unlock and re-checks the pins at once.
+    func resumeKeeping() {
+        guard pausedUntil != nil else { return }
+        clearPause(logMessage: "Resumed keeping")
+        requestReconcile(reason: "after resuming from a pause")
+    }
+
+    func scheduleResume(at date: Date) {
+        resumeTask?.cancel()
+        let delay = max(0, date.timeIntervalSince(now()))
+        resumeTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(delay))
+            guard !Task.isCancelled else { return }
+            self?.resumeKeeping()
+        }
+    }
+
+    func clearPause(logMessage: String) {
+        storePausedUntil(nil)
+        resumeTask?.cancel()
+        resumeTask = nil
+        for direction in AudioDirection.allCases { resetThrottle(for: direction) }
+        systemOutputThrottle.reset()
+        log(logMessage)
+    }
+
+    /// Forces a fresh hardware snapshot (docks/hubs can leave a stale one).
+    func rescanDevices() {
+        log("Rescanning connected devices…")
+        requestReconcile(reason: "after a manual rescan")
+    }
+
+    /// Refreshes hardware state silently when the user opens the popover or Settings.
+    func refreshOnMenuOpen() {
+        guard started else { return }
+        requestReconcile(reason: "when opening the menu")
+    }
+
+    /// Triggered by `AppDelegate` on `NSWorkspace.didWakeNotification`.
+    func handleSystemWake() {
+        requestReconcile(reason: "after waking from sleep")
+        wakeFollowUpTask?.cancel()
+        wakeFollowUpTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(Self.wakeFollowUpDelay))
+            guard !Task.isCancelled else { return }
+            self?.requestReconcile(reason: "after waking from sleep")
+        }
+    }
+
+    /// First-launch adoption, per direction. An unreadable default stays
+    /// pending; disabled keeping completes without a pin. A completed
+    /// direction is never re-adopted (unpins stick).
+    func adoptCurrentDefaultsAsInitialPins() {
+        for direction in AudioDirection.allCases where !settings.didAdoptInitialPin(for: direction) {
+            if pinnedUID(for: direction) != nil || !keepingEnabled(for: direction) {
+                settings.setDidAdoptInitialPin(for: direction)
+                continue
+            }
+            guard let uid = currentUID(for: direction),
+                  let device = devices.first(where: { $0.uid == uid && $0.supports(direction) }) else {
+                continue
+            }
+            let label = displayName(for: device, direction: direction)
+            storePin(uid: device.uid, name: label, for: direction)
+            settings.setDidAdoptInitialPin(for: direction)
+            log("Pinned current \(direction.displayName.lowercased()) “\(label)”")
         }
     }
 }
